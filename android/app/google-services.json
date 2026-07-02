@@ -1,0 +1,54 @@
+{
+  "project_info": {
+    "project_number": "291337767318",
+    "project_id": "subay-app",
+    "storage_bucket": "subay-app.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:291337767318:android:a362e56e9b588e7e91b5b7",
+        "android_client_info": {
+          "package_name": "com.subay.app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "291337767318-b4kk2f0uncsi086hmt2n368ut3kn7lvs.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.subay.app",
+            "certificate_hash": "95ac03735cb0711b3db05212629b475666aa1b8a"
+          }
+        },
+        {
+          "client_id": "291337767318-9kj8red7g44c62rhlt2qidvbm4efk0ef.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBg30uxGbV5Wbz0p-78u0ryIA-z3_5uB28"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "291337767318-9kj8red7g44c62rhlt2qidvbm4efk0ef.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "291337767318-nd3l43q030uciu9l6uj6ubovjptoacrm.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.subay"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
