@@ -11,6 +11,7 @@ class SubayApp extends StatelessWidget {
   const SubayApp({super.key});
 
   @override
+  
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'SUBAY',

@@ -147,9 +147,7 @@ class _SearchField extends StatelessWidget {
         decoration: InputDecoration(
           hintText: hint,
           hintStyle: const TextStyle(color: AppColors.textMuted, fontSize: 13),
-          prefixIcon: prefixChild != null
-              ? prefixChild
-              : (prefixIcon != null
+          prefixIcon: prefixChild ?? (prefixIcon != null
                   ? Icon(prefixIcon, color: prefixIconColor, size: 18)
                   : null),
           prefixIconConstraints: const BoxConstraints(minWidth: 40),

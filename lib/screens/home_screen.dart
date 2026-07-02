@@ -14,19 +14,24 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   int _currentIndex = 0;
 
-  final List<Widget> _screens = const [
-    MapScreen(),
-    RoutingScreen(),
-    NotificationScreen(),
-    ProfileScreen(),
-  ];
+  // Called by MapScreen's "Go to Route" button
+  void _goToRouting() {
+    setState(() => _currentIndex = 1);
+  }
 
   @override
   Widget build(BuildContext context) {
+    final List<Widget> screens = [
+      MapScreen(onGoToRoute: _goToRouting), // pass callback
+      const RoutingScreen(),
+      const NotificationScreen(),
+      const ProfileScreen(),
+    ];
+
     return Scaffold(
       body: IndexedStack(
         index: _currentIndex,
-        children: _screens,
+        children: screens,
       ),
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _currentIndex,

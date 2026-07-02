@@ -4,16 +4,41 @@ import 'package:latlong2/latlong.dart' hide Path;
 import 'package:geolocator/geolocator.dart';
 import '../theme/app_colors.dart';
 
+// ── Vehicle passability model ─────────────────────────────────────────────────
+
+class VehicleType {
+  final String name;
+  final IconData icon;
+  final double maxPassableHeight; // cm — above this = unpassable
+
+  const VehicleType({
+    required this.name,
+    required this.icon,
+    required this.maxPassableHeight,
+  });
+
+  bool canPass(double waterLevel) => waterLevel <= maxPassableHeight;
+}
+
+// Thresholds based on typical vehicle ground clearance + safety margin
+const _vehicleTypes = [
+  VehicleType(name: 'Bicycle',    icon: Icons.pedal_bike,        maxPassableHeight: 15),
+  VehicleType(name: 'Motorcycle', icon: Icons.two_wheeler,       maxPassableHeight: 25),
+  VehicleType(name: 'Sedan / Car',icon: Icons.directions_car,    maxPassableHeight: 40),
+  VehicleType(name: 'SUV / Van',  icon: Icons.airport_shuttle,   maxPassableHeight: 65),
+  VehicleType(name: 'Truck / Bus',icon: Icons.local_shipping,    maxPassableHeight: 90),
+];
+
 // ── Data model ────────────────────────────────────────────────────────────────
 
 class CctvLocation {
   final String id;
   final String name;
   final String address;
-  final String status; // 'NORMAL' | 'ALERT' | 'DANGER'
-  final double floodHeight; // cm
+  final String status;
+  final double floodHeight;
   final String lastUpdated;
-  final LatLng position; // real map coordinates
+  final LatLng position;
 
   const CctvLocation({
     required this.id,
@@ -50,7 +75,7 @@ class CctvLocation {
   }
 }
 
-// ── Sample CCTV data with real CDO coordinates ────────────────────────────────
+// ── Sample CCTV data ──────────────────────────────────────────────────────────
 
 final List<CctvLocation> _cctvLocations = [
   CctvLocation(
@@ -94,7 +119,10 @@ final List<CctvLocation> _cctvLocations = [
 // ── Screen ────────────────────────────────────────────────────────────────────
 
 class MapScreen extends StatefulWidget {
-  const MapScreen({super.key});
+  // Callback so the "Go to Route" button can switch bottom nav tabs
+  final VoidCallback? onGoToRoute;
+
+  const MapScreen({super.key, this.onGoToRoute});
 
   @override
   State<MapScreen> createState() => _MapScreenState();
@@ -138,8 +166,8 @@ class _MapScreenState extends State<MapScreen> {
     }
 
     if (permission == LocationPermission.deniedForever) {
-      messenger.showSnackBar(
-        const SnackBar(content: Text('Enable location permissions in settings.')));
+      messenger.showSnackBar(const SnackBar(
+        content: Text('Enable location permissions in settings.')));
       return null;
     }
 
@@ -166,7 +194,9 @@ class _MapScreenState extends State<MapScreen> {
           _mapController.move(latlng, 16);
         } catch (_) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
-            try { _mapController.move(latlng, 16); } catch (_) {}
+            try {
+              _mapController.move(latlng, 16);
+            } catch (_) {}
           });
         }
       }
@@ -175,7 +205,7 @@ class _MapScreenState extends State<MapScreen> {
     if (mounted) setState(() => _isLocating = false);
   }
 
-  // ── Tap a pin → open bottom sheet ────────────────────────────────────────
+  // ── Pin tapped ────────────────────────────────────────────────────────────
 
   void _onPinTapped(CctvLocation loc) {
     _mapController.move(
@@ -186,16 +216,21 @@ class _MapScreenState extends State<MapScreen> {
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
-      builder: (_) => _CctvBottomSheet(location: loc),
+      builder: (_) => _CctvBottomSheet(
+        location: loc,
+        onGoToRoute: () {
+          Navigator.pop(context); // close bottom sheet first
+          widget.onGoToRoute?.call(); // then switch tab
+        },
+      ),
     );
   }
 
-  // ── Build all markers ─────────────────────────────────────────────────────
+  // ── Markers ───────────────────────────────────────────────────────────────
 
   List<Marker> _buildMarkers() {
     final markers = <Marker>[];
 
-    // CCTV pins — anchored to real LatLng so they follow the map
     for (final loc in _cctvLocations) {
       markers.add(Marker(
         point: loc.position,
@@ -208,7 +243,6 @@ class _MapScreenState extends State<MapScreen> {
       ));
     }
 
-    // Blue user location dot
     if (_currentLocation != null) {
       markers.add(Marker(
         point: _currentLocation!,
@@ -256,7 +290,7 @@ class _MapScreenState extends State<MapScreen> {
       body: Stack(
         children: [
 
-          // ── FLUTTER MAP ──────────────────────────────────────────────────
+          // ── MAP ───────────────────────────────────────────────────────────
           FlutterMap(
             mapController: _mapController,
             options: const MapOptions(
@@ -272,12 +306,11 @@ class _MapScreenState extends State<MapScreen> {
                 userAgentPackageName: 'com.subay.app',
                 maxZoom: 19,
               ),
-              // Pins are now inside the map — they follow pan & zoom
               MarkerLayer(markers: _buildMarkers()),
             ],
           ),
 
-          // ── SEARCH BAR ───────────────────────────────────────────────────
+          // ── SEARCH BAR ────────────────────────────────────────────────────
           Positioned(
             top: topPad + 8,
             left: 12,
@@ -288,8 +321,8 @@ class _MapScreenState extends State<MapScreen> {
               child: const TextField(
                 decoration: InputDecoration(
                   hintText: 'Search here',
-                  hintStyle: TextStyle(
-                      color: AppColors.textMuted, fontSize: 14),
+                  hintStyle:
+                      TextStyle(color: AppColors.textMuted, fontSize: 14),
                   prefixIcon: Icon(Icons.search,
                       color: AppColors.textMuted, size: 20),
                   border: InputBorder.none,
@@ -331,7 +364,7 @@ class _MapScreenState extends State<MapScreen> {
             ),
           ),
 
-          // ── MY LOCATION + ROUTE FABS ─────────────────────────────────────
+          // ── MY LOCATION + ROUTE FABS ──────────────────────────────────────
           Positioned(
             bottom: 86,
             right: 14,
@@ -345,7 +378,7 @@ class _MapScreenState extends State<MapScreen> {
                       width: 18,
                       height: 18,
                       child: CircularProgressIndicator(
-                        strokeWidth: 2, color: AppColors.primary),
+                          strokeWidth: 2, color: AppColors.primary),
                     )
                   : const Icon(Icons.my_location,
                       color: AppColors.primary, size: 20),
@@ -356,7 +389,7 @@ class _MapScreenState extends State<MapScreen> {
             right: 14,
             child: FloatingActionButton(
               heroTag: 'route',
-              onPressed: () {},
+              onPressed: widget.onGoToRoute,
               backgroundColor: AppColors.primary,
               child: const Icon(Icons.route, color: Colors.white),
             ),
@@ -366,10 +399,9 @@ class _MapScreenState extends State<MapScreen> {
       ),
     );
   }
-} // ← closes _MapScreenState  ✅
+} // ← closes _MapScreenState
 
-// ── CCTV Pin widget ───────────────────────────────────────────────────────────
-// These are now outside _MapScreenState — this was the main bug
+// ── CCTV Pin ──────────────────────────────────────────────────────────────────
 
 class _CctvPin extends StatelessWidget {
   final CctvLocation location;
@@ -424,7 +456,6 @@ class _TrianglePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    // Using Flutter's built-in Path (latlong2's Path is hidden via 'hide Path')
     final path = Path()
       ..moveTo(0, 0)
       ..lineTo(size.width, 0)
@@ -467,7 +498,12 @@ class _LegendItem extends StatelessWidget {
 
 class _CctvBottomSheet extends StatelessWidget {
   final CctvLocation location;
-  const _CctvBottomSheet({required this.location});
+  final VoidCallback onGoToRoute;
+
+  const _CctvBottomSheet({
+    required this.location,
+    required this.onGoToRoute,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -481,11 +517,11 @@ class _CctvBottomSheet extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Drag handle
+
+          // ── Drag handle ───────────────────────────────────────────────────
           Center(
             child: Container(
-              width: 32,
-              height: 3,
+              width: 32, height: 3,
               decoration: BoxDecoration(
                 color: const Color(0xFFDDDDDD),
                 borderRadius: BorderRadius.circular(2),
@@ -494,7 +530,7 @@ class _CctvBottomSheet extends StatelessWidget {
           ),
           const SizedBox(height: 14),
 
-          // Header
+          // ── Header: name + address + status badge ─────────────────────────
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -504,8 +540,7 @@ class _CctvBottomSheet extends StatelessWidget {
                   children: [
                     Row(children: [
                       Container(
-                        width: 9,
-                        height: 9,
+                        width: 9, height: 9,
                         decoration: BoxDecoration(
                           color: location.statusColor,
                           shape: BoxShape.circle,
@@ -554,120 +589,143 @@ class _CctvBottomSheet extends StatelessWidget {
           ),
           const SizedBox(height: 12),
 
-          // CCTV snapshot placeholder
+          // ── Water level stat ──────────────────────────────────────────────
           Container(
-            height: 110,
-            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             decoration: BoxDecoration(
-              color: const Color(0xFF1A1A2E),
+              color: AppColors.infoLight,
               borderRadius: BorderRadius.circular(10),
             ),
-            child: Stack(
+            child: Row(
               children: [
-                Center(
-                  child: Icon(Icons.videocam,
-                    color: Colors.white.withValues(alpha: 0.2), size: 40),
-                ),
-                Positioned(
-                  top: 7, left: 7,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 7, vertical: 3),
-                    decoration: BoxDecoration(
-                      color: Colors.red.withValues(alpha: 0.9),
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: Row(mainAxisSize: MainAxisSize.min, children: [
-                      Container(
-                        width: 5, height: 5,
-                        decoration: const BoxDecoration(
-                          color: Colors.white, shape: BoxShape.circle),
+                const Icon(Icons.water_drop_outlined,
+                    color: AppColors.infoText, size: 18),
+                const SizedBox(width: 8),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('Current Water Level',
+                      style: TextStyle(
+                          fontSize: 10, color: AppColors.textMuted)),
+                    Text(
+                      '${location.floodHeight.toInt()} cm',
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        color: AppColors.infoText,
                       ),
-                      const SizedBox(width: 4),
-                      const Text('LIVE',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 9,
-                          fontWeight: FontWeight.w700,
-                        )),
-                    ]),
-                  ),
+                    ),
+                  ],
                 ),
-                Positioned(
-                  bottom: 8, right: 10,
-                  child: Text(location.lastUpdated,
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.5),
-                      fontSize: 10,
-                    )),
+                const Spacer(),
+                Text(
+                  'Updated ${location.lastUpdated}',
+                  style: const TextStyle(
+                      fontSize: 10, color: AppColors.textMuted),
                 ),
               ],
             ),
           ),
-          const SizedBox(height: 10),
-
-          // Stats row
-          Row(
-            children: [
-              Expanded(child: _StatPill(
-                label: 'Water Level',
-                value: '${location.floodHeight.toInt()} cm',
-                bgColor: AppColors.infoLight,
-                textColor: AppColors.infoText,
-              )),
-              const SizedBox(width: 6),
-              Expanded(child: _StatPill(
-                label: 'Status',
-                value: location.status,
-                bgColor: location.statusLightColor,
-                textColor: location.statusTextColor,
-              )),
-              const SizedBox(width: 6),
-              Expanded(child: _StatPill(
-                label: 'Updated',
-                value: location.lastUpdated,
-                bgColor: AppColors.backgroundSecondary,
-                textColor: AppColors.textSecondary,
-              )),
-            ],
-          ),
           const SizedBox(height: 12),
 
-          // Action buttons
+          // ── Vehicle passability list ──────────────────────────────────────
+          const Text(
+            'Vehicle Passability',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: AppColors.textSecondary,
+            ),
+          ),
+          const SizedBox(height: 6),
+
+          // Grid of vehicle rows
+          ..._vehicleTypes.map((v) =>
+            _VehicleRow(vehicle: v, waterLevel: location.floodHeight)),
+
+          const SizedBox(height: 14),
+
+          // ── Single action button: Go to Route ─────────────────────────────
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: onGoToRoute,
+              icon: const Icon(Icons.route, size: 16),
+              label: const Text(
+                'Go to Route',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.primary,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10)),
+                padding: const EdgeInsets.symmetric(vertical: 13),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Vehicle Row ───────────────────────────────────────────────────────────────
+
+class _VehicleRow extends StatelessWidget {
+  final VehicleType vehicle;
+  final double waterLevel;
+
+  const _VehicleRow({required this.vehicle, required this.waterLevel});
+
+  @override
+  Widget build(BuildContext context) {
+    final passable = vehicle.canPass(waterLevel);
+    final Color bgColor   = passable ? AppColors.normalLight  : AppColors.dangerLight;
+    final Color iconColor = passable ? AppColors.normalText   : AppColors.dangerText;
+    final Color textColor = passable ? AppColors.normalText   : AppColors.dangerText;
+    final String statusLabel = passable ? 'Passable'   : 'Unpassable';
+    final IconData statusIcon = passable ? Icons.check_circle_outline
+                                         : Icons.cancel_outlined;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: bgColor,
+        borderRadius: BorderRadius.circular(9),
+      ),
+      child: Row(
+        children: [
+          Icon(vehicle.icon, size: 18, color: iconColor),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              vehicle.name,
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+                color: AppColors.textPrimary,
+              ),
+            ),
+          ),
+          // Threshold hint
+          Text(
+            '≤ ${vehicle.maxPassableHeight.toInt()} cm',
+            style: const TextStyle(
+                fontSize: 10, color: AppColors.textMuted),
+          ),
+          const SizedBox(width: 8),
           Row(
             children: [
-              Expanded(
-                child: ElevatedButton.icon(
-                  onPressed: () => Navigator.pop(context),
-                  icon: const Icon(Icons.route, size: 15),
-                  label: const Text('Get Route',
-                    style: TextStyle(
-                        fontSize: 13, fontWeight: FontWeight.w600)),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.primary,
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(9)),
-                    padding: const EdgeInsets.symmetric(vertical: 11),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: () {},
-                  icon: const Icon(Icons.videocam_outlined, size: 15),
-                  label: const Text('View CCTV',
-                    style: TextStyle(
-                        fontSize: 13, fontWeight: FontWeight.w600)),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: AppColors.primary,
-                    side: const BorderSide(
-                        color: AppColors.primary, width: 1.5),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(9)),
-                    padding: const EdgeInsets.symmetric(vertical: 11),
-                  ),
+              Icon(statusIcon, size: 14, color: textColor),
+              const SizedBox(width: 3),
+              Text(
+                statusLabel,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: textColor,
                 ),
               ),
             ],
@@ -678,7 +736,7 @@ class _CctvBottomSheet extends StatelessWidget {
   }
 }
 
-// ── Stat Pill ─────────────────────────────────────────────────────────────────
+// ── Stat Pill (kept for reference, no longer used in bottom sheet) ─────────────
 
 class _StatPill extends StatelessWidget {
   final String label, value;
@@ -699,15 +757,15 @@ class _StatPill extends StatelessWidget {
           color: bgColor, borderRadius: BorderRadius.circular(8)),
       child: Column(children: [
         Text(label,
-          style: const TextStyle(
-              fontSize: 9, color: AppColors.textMuted)),
+            style: const TextStyle(
+                fontSize: 9, color: AppColors.textMuted)),
         const SizedBox(height: 2),
         Text(value,
-          style: TextStyle(
-            fontSize: 12,
-            fontWeight: FontWeight.w700,
-            color: textColor,
-          )),
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              color: textColor,
+            )),
       ]),
     );
   }
