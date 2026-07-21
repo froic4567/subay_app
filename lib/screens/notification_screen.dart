@@ -60,7 +60,7 @@ class NotificationScreen extends StatefulWidget {
 }
 
 class _NotificationScreenState extends State<NotificationScreen> {
-  int _filterIndex = 0; // 0 = All, 1 = Unread
+  int _filterIndex = 0; // 0 = All, 1 = Alert, 2 = Danger
   List<NotificationItem> _notifications = [];
   bool _isLoading = true;
   Timer? _refreshTimer;
@@ -84,7 +84,12 @@ class _NotificationScreenState extends State<NotificationScreen> {
     if (!mounted) return;
 
     setState(() {
-      _notifications = docs.asMap().entries.map((entry) {
+      // Filter out normal/safe notifications — only keep danger and alert
+      final filtered = docs.where((doc) {
+        final rawStatus = (doc['status'] as String? ?? 'safe').toLowerCase();
+        return rawStatus == 'danger' || rawStatus == 'alert';
+      }).toList();
+      _notifications = filtered.asMap().entries.map((entry) {
         return _convertDocToNotification(entry.key, entry.value);
       }).toList();
       _isLoading = false;
@@ -157,7 +162,9 @@ class _NotificationScreenState extends State<NotificationScreen> {
   List<NotificationItem> get _filtered {
     switch (_filterIndex) {
       case 1:
-        return _notifications.where((n) => !n.isRead).toList();
+        return _notifications.where((n) => n.status == 'ALERT').toList();
+      case 2:
+        return _notifications.where((n) => n.status == 'DANGER').toList();
       default:
         return _notifications;
     }
@@ -194,9 +201,15 @@ class _NotificationScreenState extends State<NotificationScreen> {
                 ),
                 const SizedBox(width: 8),
                 _FilterTab(
-                  label: 'Unread',
+                  label: 'Alert',
                   selected: _filterIndex == 1,
                   onTap: () => setState(() => _filterIndex = 1),
+                ),
+                const SizedBox(width: 8),
+                _FilterTab(
+                  label: 'Danger',
+                  selected: _filterIndex == 2,
+                  onTap: () => setState(() => _filterIndex = 2),
                 ),
               ],
             ),
