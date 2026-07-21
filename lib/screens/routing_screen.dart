@@ -1422,7 +1422,7 @@ class _RouteBottomSheetState extends State<_RouteBottomSheet> {
                   shrinkWrap: true,
                   padding: const EdgeInsets.all(8),
                   itemCount: avoidedNodes.length,
-                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  separatorBuilder: (_, _) => const Divider(height: 1),
                   itemBuilder: (context, index) {
                     final node = avoidedNodes[index];
                     final statusColor = node.status == 'DANGER'
