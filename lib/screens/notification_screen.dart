@@ -9,7 +9,7 @@ class NotificationItem {
   final String title;       // "Flood DANGER", "Flood ALERT", "Flood NORMAL"
   final String location;    // "Lapasan Highway, CDO"
   final String status;      // 'DANGER' | 'ALERT' | 'NORMAL'
-  final double floodHeight; // in cm
+  final double floodHeight; // in meters
   final String timeAgo;     // "2 min ago"
   final bool isRead;
 
@@ -115,8 +115,7 @@ class _NotificationScreenState extends State<NotificationScreen> {
         title = 'Flood NORMAL';
     }
 
-    final waterLevelMeters = (doc['water_level'] as num?)?.toDouble() ?? 0;
-    final floodHeight = (waterLevelMeters * 100).roundToDouble();
+    final floodHeight = (doc['water_level'] as num?)?.toDouble() ?? 0;
 
     final timestamp = doc['timestamp'] as String?;
     final timeAgo = _formatTimestamp(timestamp);
@@ -416,7 +415,7 @@ class _NotificationCard extends StatelessWidget {
                           borderRadius: BorderRadius.circular(6),
                         ),
                         child: Text(
-                          'Flood Height: ${item.floodHeight.toInt()} cm',
+                          'Flood Height: ${item.floodHeight.toStringAsFixed(2)} m',
                           style: const TextStyle(
                             fontSize: 11,
                             fontWeight: FontWeight.w600,

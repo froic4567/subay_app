@@ -24,51 +24,9 @@ const COLLECTION_NAME = 'cctv data';
 let dbCollection = null;
 let isConnecting = false;
 
-// Fallback sample data (matches MongoDB document structure)
-const fallbackData = [
-  {
-    status: 'danger',
-    water_level: 0.87,
-    location_name: 'Lapasan Highway, CDO',
-    location: { type: 'Point', coordinates: [124.6433, 8.4822] },
-    timestamp: '2026-07-16T08:00:00Z',
-  },
-  {
-    status: 'alert',
-    water_level: 0.52,
-    location_name: 'Macabalan, CDO',
-    location: { type: 'Point', coordinates: [124.6493, 8.4857] },
-    timestamp: '2026-07-16T07:47:00Z',
-  },
-  {
-    status: 'safe',
-    water_level: 0.18,
-    location_name: 'Kauswagan, CDO',
-    location: { type: 'Point', coordinates: [124.6476, 8.4872] },
-    timestamp: '2026-07-16T07:02:00Z',
-  },
-  {
-    status: 'danger',
-    water_level: 0.95,
-    location_name: 'Camaman-an, CDO',
-    location: { type: 'Point', coordinates: [124.6530, 8.4838] },
-    timestamp: '2026-07-16T06:30:00Z',
-  },
-  {
-    status: 'safe',
-    water_level: 0.05,
-    location_name: 'Bugo, CDO',
-    location: { type: 'Point', coordinates: [124.6501, 8.4818] },
-    timestamp: '2026-07-16T06:00:00Z',
-  },
-  {
-    status: 'alert',
-    water_level: 0.30,
-    location_name: 'Agusan, CDO',
-    location: { type: 'Point', coordinates: [124.6512, 8.4900] },
-    timestamp: '2026-07-16T05:30:00Z',
-  },
-];
+// This backend is fully database-driven. When MongoDB is unavailable or has no
+// documents, endpoints return an empty array so the app never shows phantom
+// (hardcoded) flood hazards — routing depends solely on real database markers.
 
 async function connectDB() {
   if (isConnecting) return;
@@ -82,7 +40,7 @@ async function connectDB() {
     console.log(`   Database: ${DB_NAME} | Collection: ${COLLECTION_NAME}`);
   } catch (err) {
     console.error('❌ MongoDB connection error:', err.message);
-    console.error('   The server will start with fallback data.');
+    console.error('   The server will start and return empty data until connected.');
     console.error('   Make sure your IP is whitelisted in MongoDB Atlas:');
     console.error('   Atlas → Network Access → Add IP → 0.0.0.0/0 (for testing)');
     dbCollection = null;
@@ -118,19 +76,15 @@ app.get('/api/health', (req, res) => {
 app.get('/api/cctv', async (req, res) => {
   try {
     if (!dbCollection) {
-      console.log('⚠️  DB not connected, returning fallback data');
-      return res.json(fallbackData);
+      console.log('⚠️  DB not connected, returning empty list');
+      return res.json([]);
     }
 
     const documents = await dbCollection.find({}).toArray();
-    if (documents.length === 0) {
-      return res.json(fallbackData);
-    }
     res.json(documents);
   } catch (err) {
     console.error('Error fetching CCTV data:', err.message);
-    // Return fallback instead of error so the app still works
-    res.json(fallbackData);
+    res.json([]);
   }
 });
 
@@ -138,8 +92,7 @@ app.get('/api/cctv', async (req, res) => {
 app.get('/api/cctv/:status', async (req, res) => {
   try {
     if (!dbCollection) {
-      const status = req.params.status.toLowerCase();
-      return res.json(fallbackData.filter(d => d.status === status));
+      return res.json([]);
     }
 
     const status = req.params.status.toLowerCase();
@@ -147,8 +100,7 @@ app.get('/api/cctv/:status', async (req, res) => {
     res.json(documents);
   } catch (err) {
     console.error('Error fetching CCTV data by status:', err.message);
-    const status = req.params.status.toLowerCase();
-    res.json(fallbackData.filter(d => d.status === status));
+    res.json([]);
   }
 });
 
@@ -157,9 +109,7 @@ app.get('/api/cctv/:status', async (req, res) => {
 app.get('/api/alerts', async (req, res) => {
   try {
     if (!dbCollection) {
-      return res.json(fallbackData.filter(d =>
-        d.status === 'alert' || d.status === 'danger'
-      ));
+      return res.json([]);
     }
 
     const documents = await dbCollection.find({
@@ -176,9 +126,7 @@ app.get('/api/alerts', async (req, res) => {
     res.json(documents);
   } catch (err) {
     console.error('Error fetching alerts:', err.message);
-    res.json(fallbackData.filter(d =>
-      d.status === 'alert' || d.status === 'danger'
-    ));
+    res.json([]);
   }
 });
 

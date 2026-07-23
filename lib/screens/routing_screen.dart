@@ -42,6 +42,8 @@ class _RoutingScreenState extends State<RoutingScreen> {
   // Search state
   Timer? _originDebounce;
   Timer? _destDebounce;
+  // Periodically re-checks flood conditions and reroutes if they change.
+  Timer? _rerouteTimer;
   List<GeoSearchResult> _originResults = [];
   List<GeoSearchResult> _destResults = [];
   bool _originSearching = false;
@@ -82,6 +84,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
   void dispose() {
     _originDebounce?.cancel();
     _destDebounce?.cancel();
+    _rerouteTimer?.cancel();
     _destController.dispose();
     _originController.dispose();
     _mapController.dispose();
@@ -309,9 +312,72 @@ class _RoutingScreenState extends State<RoutingScreen> {
 
     if (result != null) {
       _fitRouteToMap(result.polyline);
+      _startFloodPolling();
+      if (!result.isFullySafe && result.warningMessage != null) {
+        _showLocationMessage(result.warningMessage!);
+      }
     } else {
+      _stopFloodPolling();
       _showLocationMessage('No safe route was found for this vehicle type.');
     }
+  }
+
+  /// Begins polling flood conditions so the route updates itself when a CCTV
+  /// point changes status while the user is viewing/navigating a route.
+  void _startFloodPolling() {
+    _rerouteTimer?.cancel();
+    _rerouteTimer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => _checkForReroute(),
+    );
+  }
+
+  void _stopFloodPolling() {
+    _rerouteTimer?.cancel();
+    _rerouteTimer = null;
+  }
+
+  Future<void> _checkForReroute() async {
+    if (_routePlanResult == null) return;
+
+    final origin = _originLatLng ?? _defaultLocation;
+    final destination = _destLatLng ?? _defaultLocation;
+    if (origin.latitude == destination.latitude &&
+        origin.longitude == destination.longitude) {
+      return;
+    }
+
+    final newResult = await RoutePlanner.planRoute(
+      origin: origin,
+      destination: destination,
+      vehicleType: _selectedVehicleType,
+    );
+    if (!mounted || newResult == null) return;
+
+    final previous = _routePlanResult;
+    // Only surface an update when the safety picture meaningfully changed.
+    final changed = previous == null ||
+        newResult.isFullySafe != previous.isFullySafe ||
+        newResult.warningMessage != previous.warningMessage ||
+        newResult.polyline.length != previous.polyline.length;
+    if (!changed) return;
+
+    setState(() {
+      _routePlanResult = newResult;
+      _routeFound = true;
+    });
+    _showRerouteSnackbar();
+  }
+
+  void _showRerouteSnackbar() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Route updated due to new flood conditions.'),
+        backgroundColor: Colors.orange,
+        duration: Duration(seconds: 3),
+      ),
+    );
   }
 
   @override
@@ -1451,7 +1517,7 @@ class _RouteBottomSheetState extends State<_RouteBottomSheet> {
                                   ),
                                 ),
                                 Text(
-                                  '${node.status} · ${node.waterLevelCm}cm water',
+                                  '${node.status} · ${node.waterLevelM.toStringAsFixed(2)}m water',
                                   style: TextStyle(
                                     fontSize: 10,
                                     color: statusColor,

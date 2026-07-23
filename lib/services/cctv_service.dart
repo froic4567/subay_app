@@ -4,6 +4,11 @@ import 'package:http/http.dart' as http;
 
 /// Fetches CCTV flood monitoring data from the backend API (which connects to MongoDB).
 ///
+/// This service is fully database-driven: flood hazards (danger/alert) come
+/// exclusively from the live database. If the backend is unreachable or returns
+/// nothing, these methods return an EMPTY list — no hardcoded/sample hazards are
+/// ever injected, so routing only ever avoids real, database-marked flood points.
+///
 /// URL selection:
 /// - Web (Chrome): http://localhost:3000
 /// - Android emulator: http://10.0.2.2:3000
@@ -22,10 +27,12 @@ class CctvService {
   /// Fetches all CCTV documents from the MongoDB backend.
   /// Returns documents in the same format as the database:
   /// { status, water_level, location: { type: "Point", coordinates: [lng, lat] }, timestamp }
+  ///
+  /// Returns an empty list when the backend is unreachable or has no data.
   static Future<List<Map<String, dynamic>>> fetchCctvData() async {
     final url = '$_baseUrl/api/cctv';
     print('🔌 [CCTV] Connecting to backend: $url');
-    
+
     try {
       final response = await http.get(
         Uri.parse(url),
@@ -33,42 +40,36 @@ class CctvService {
       ).timeout(const Duration(seconds: 8));
 
       print('📡 [CCTV] Response status: ${response.statusCode}');
-      
+
       if (response.statusCode != 200) {
         print('❌ [CCTV] Bad status code: ${response.statusCode}');
-        return _fallbackData();
+        return <Map<String, dynamic>>[];
       }
 
       final List<dynamic> json = jsonDecode(response.body) as List<dynamic>;
       print('✅ [CCTV] Received ${json.length} records from database');
-      
-      if (json.isEmpty) {
-        print('⚠️ [CCTV] Empty response, using fallback data');
-        return _fallbackData();
-      }
 
-      // Log first record structure for debugging
-      if (json.isNotEmpty) {
-        print('📋 [CCTV] Sample record: ${json[0]}');
+      if (json.isEmpty) {
+        print('⚠️ [CCTV] Empty response from database');
+        return <Map<String, dynamic>>[];
       }
 
       return json.cast<Map<String, dynamic>>();
     } catch (e) {
-      // Backend not running or unreachable — use fallback sample data
+      // Backend not running or unreachable — return no data so routing depends
+      // purely on the live database's flood markers.
       print('❌ [CCTV] Connection failed: $e');
-      print('⚠️ [CCTV] Using fallback sample data');
-      return _fallbackData();
+      return <Map<String, dynamic>>[];
     }
   }
 
   /// Fetches only alert and danger documents from the backend.
   /// Used by the Notification screen.
-  /// Returns documents in the same format as the database:
-  /// { status, water_level, location_name, location: { type: "Point", coordinates: [lng, lat] }, timestamp }
+  /// Returns an empty list when the backend is unreachable or has no data.
   static Future<List<Map<String, dynamic>>> fetchAlerts() async {
     final url = '$_baseUrl/api/alerts';
     print('🔌 [Alerts] Connecting to backend: $url');
-    
+
     try {
       final response = await http.get(
         Uri.parse(url),
@@ -79,27 +80,28 @@ class CctvService {
 
       if (response.statusCode != 200) {
         print('❌ [Alerts] Bad status code: ${response.statusCode}');
-        return _fallbackAlerts();
+        return <Map<String, dynamic>>[];
       }
 
       final List<dynamic> json = jsonDecode(response.body) as List<dynamic>;
       print('✅ [Alerts] Received ${json.length} alert records');
-      
-      if (json.isEmpty) return _fallbackAlerts();
+
+      if (json.isEmpty) return <Map<String, dynamic>>[];
 
       return json.cast<Map<String, dynamic>>();
     } catch (e) {
-      print(' [Alerts] Connection failed: $e');
-      return _fallbackAlerts();
+      print('❌ [Alerts] Connection failed: $e');
+      return <Map<String, dynamic>>[];
     }
   }
 
   /// Fetches ALL CCTV documents (normal, alert, danger) for the notification screen.
   /// Returns documents sorted by timestamp descending (newest first).
+  /// Returns an empty list when the backend is unreachable or has no data.
   static Future<List<Map<String, dynamic>>> fetchAllNotifications() async {
     final url = '$_baseUrl/api/cctv';
-    print(' [Notifications] Connecting to backend: $url');
-    
+    print('🔌 [Notifications] Connecting to backend: $url');
+
     try {
       final response = await http.get(
         Uri.parse(url),
@@ -110,13 +112,13 @@ class CctvService {
 
       if (response.statusCode != 200) {
         print('❌ [Notifications] Bad status code: ${response.statusCode}');
-        return _fallbackNotifications();
+        return <Map<String, dynamic>>[];
       }
 
       final List<dynamic> json = jsonDecode(response.body) as List<dynamic>;
       print('✅ [Notifications] Received ${json.length} records');
-      
-      if (json.isEmpty) return _fallbackNotifications();
+
+      if (json.isEmpty) return <Map<String, dynamic>>[];
 
       // Sort by timestamp descending (newest first)
       json.sort((a, b) {
@@ -128,80 +130,7 @@ class CctvService {
       return json.cast<Map<String, dynamic>>();
     } catch (e) {
       print('❌ [Notifications] Connection failed: $e');
-      return _fallbackNotifications();
+      return <Map<String, dynamic>>[];
     }
   }
-
-  /// Fallback notifications (all statuses) used when backend is not available.
-  static List<Map<String, dynamic>> _fallbackNotifications() => [
-    {
-      'status': 'danger',
-      'water_level': 0.87,
-      'location_name': 'Lapasan Highway, CDO',
-      'location': {
-        'type': 'Point',
-        'coordinates': [124.6433, 8.4822],
-      },
-      'timestamp': '2026-07-16T08:00:00Z',
-    },
-    {
-      'status': 'alert',
-      'water_level': 0.52,
-      'location_name': 'Macabalan, CDO',
-      'location': {
-        'type': 'Point',
-        'coordinates': [124.6493, 8.4857],
-      },
-      'timestamp': '2026-07-16T07:47:00Z',
-    },
-    {
-      'status': 'safe',
-      'water_level': 0.18,
-      'location_name': 'Kauswagan, CDO',
-      'location': {
-        'type': 'Point',
-        'coordinates': [124.6476, 8.4872],
-      },
-      'timestamp': '2026-07-16T07:02:00Z',
-    },
-    {
-      'status': 'danger',
-      'water_level': 0.95,
-      'location_name': 'Camaman-an, CDO',
-      'location': {
-        'type': 'Point',
-        'coordinates': [124.6530, 8.4838],
-      },
-      'timestamp': '2026-07-16T06:30:00Z',
-    },
-    {
-      'status': 'safe',
-      'water_level': 0.05,
-      'location_name': 'Bugo, CDO',
-      'location': {
-        'type': 'Point',
-        'coordinates': [124.6501, 8.4818],
-      },
-      'timestamp': '2026-07-16T06:00:00Z',
-    },
-    {
-      'status': 'alert',
-      'water_level': 0.30,
-      'location_name': 'Agusan, CDO',
-      'location': {
-        'type': 'Point',
-        'coordinates': [124.6512, 8.4900],
-      },
-      'timestamp': '2026-07-16T05:30:00Z',
-    },
-  ];
-
-  /// Fallback alerts (alert + danger only) used when backend is not available.
-  static List<Map<String, dynamic>> _fallbackAlerts() => _fallbackNotifications()
-      .where((d) => d['status'] == 'alert' || d['status'] == 'danger')
-      .toList();
-
-  /// Sample data used as fallback when the backend is not available.
-  /// Matches the MongoDB document structure.
-  static List<Map<String, dynamic>> _fallbackData() => _fallbackNotifications();
 }

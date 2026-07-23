@@ -26,19 +26,19 @@ extension VehicleTypeLabel on VehicleType {
     }
   }
 
-  /// Maximum flood water depth (in cm) this vehicle type can safely pass.
-  double get maxWaterLevelCm {
+  /// Maximum flood water depth (in meters) this vehicle type can safely pass.
+  double get maxWaterLevelM {
     switch (this) {
       case VehicleType.bicycle:
-        return 15;
+        return 0.15;
       case VehicleType.motorcycle:
-        return 25;
+        return 0.25;
       case VehicleType.sedan:
-        return 40;
+        return 0.40;
       case VehicleType.suv:
-        return 65;
+        return 0.65;
       case VehicleType.truck:
-        return 90;
+        return 0.90;
     }
   }
 
@@ -58,13 +58,14 @@ extension VehicleTypeLabel on VehicleType {
   }
 }
 
+/// A single CCTV flood point along the road network.
 class RouteNode {
   final String id;
   final String name;
   final String roadName;
   final LatLng location;
-  final String status;
-  final int waterLevelCm;
+  final String status; // stored UPPERCASE: DANGER / ALERT / SAFE / NORMAL
+  final double waterLevelM; // in meters, direct from the database
   final List<String> connectedIds;
 
   const RouteNode({
@@ -73,23 +74,24 @@ class RouteNode {
     required this.roadName,
     required this.location,
     required this.status,
-    required this.waterLevelCm,
+    required this.waterLevelM,
     required this.connectedIds,
   });
 
+  /// Whether a given vehicle can safely traverse this flood point.
+  /// DANGER is impassable for everyone; ALERT is passable only if the water
+  /// level is within the vehicle's tolerance; anything else is passable.
   bool isPassableFor(VehicleType vehicleType) {
-    if (status.toUpperCase() == 'DANGER') {
-      return false;
-    }
-
-    if (status.toUpperCase() == 'ALERT') {
-      return waterLevelCm <= vehicleType.maxWaterLevelCm;
-    }
-
+    final s = status.toUpperCase();
+    if (s == 'DANGER') return false;
+    if (s == 'ALERT') return waterLevelM <= vehicleType.maxWaterLevelM;
     return true;
   }
 }
 
+/// Result of a route plan. Field names are kept stable because
+/// routing_screen.dart consumes [polyline], [etaText], [distanceKm]
+/// and [avoidedNodes] directly.
 class RoutePlanResult {
   final List<RouteNode> path;
   final double distanceKm;
@@ -98,6 +100,13 @@ class RoutePlanResult {
   final List<LatLng> polyline;
   final String summary;
 
+  /// true = every segment is NORMAL/SAFE; false = passes an ALERT segment.
+  final bool isFullySafe;
+
+  /// Non-null when the chosen path still crosses an ALERT zone, or when no
+  /// safe route could be produced at all.
+  final String? warningMessage;
+
   const RoutePlanResult({
     required this.path,
     required this.distanceKm,
@@ -105,6 +114,8 @@ class RoutePlanResult {
     required this.avoidedNodes,
     required this.polyline,
     required this.summary,
+    this.isFullySafe = true,
+    this.warningMessage,
   });
 
   /// Static helper to format minutes into a human-readable ETA string.
@@ -121,144 +132,210 @@ class RoutePlanResult {
   String get etaText => formatEta(durationMinutes);
 }
 
+/// ---------------------------------------------------------------------------
+/// Internal graph primitives used by the Dijkstra router.
+/// ---------------------------------------------------------------------------
+
+/// A weighted edge in the routing graph.
+class _Edge {
+  final int to;
+  final double weight; // meters, penalised by flood conditions
+  final bool isAlert; // true if this edge grazes a passable ALERT zone
+  const _Edge(this.to, this.weight, this.isAlert);
+}
+
+/// A single OSRM alternative route geometry.
+class _OsrmRoute {
+  final List<LatLng> points;
+  final double distanceMeters;
+  final double durationSeconds;
+  const _OsrmRoute(this.points, this.distanceMeters, this.durationSeconds);
+}
+
+/// Segment weight + whether it touches an ALERT zone.
+class _SegWeight {
+  final double weight;
+  final bool isAlert;
+  const _SegWeight(this.weight, this.isAlert);
+}
+
+/// Outcome of a Dijkstra search.
+class _DijkstraResult {
+  final List<int> path; // ordered node indices
+  final double cost;
+  final bool hasAlert;
+  const _DijkstraResult(this.path, this.cost, this.hasAlert);
+}
+
+/// A compact binary min-heap keyed by cost. Avoids adding a new dependency
+/// just for a priority queue.
+class _MinHeap {
+  final List<double> _cost = <double>[];
+  final List<int> _node = <int>[];
+
+  bool get isEmpty => _node.isEmpty;
+
+  void add(double cost, int node) {
+    _cost.add(cost);
+    _node.add(node);
+    var i = _node.length - 1;
+    while (i > 0) {
+      final parent = (i - 1) >> 1;
+      if (_cost[parent] <= _cost[i]) break;
+      _swap(i, parent);
+      i = parent;
+    }
+  }
+
+  (double, int) removeMin() {
+    final resultCost = _cost[0];
+    final resultNode = _node[0];
+    final last = _node.length - 1;
+    _cost[0] = _cost[last];
+    _node[0] = _node[last];
+    _cost.removeLast();
+    _node.removeLast();
+
+    var i = 0;
+    final len = _node.length;
+    while (true) {
+      final l = 2 * i + 1;
+      final r = 2 * i + 2;
+      var smallest = i;
+      if (l < len && _cost[l] < _cost[smallest]) smallest = l;
+      if (r < len && _cost[r] < _cost[smallest]) smallest = r;
+      if (smallest == i) break;
+      _swap(i, smallest);
+      i = smallest;
+    }
+    return (resultCost, resultNode);
+  }
+
+  void _swap(int a, int b) {
+    final tc = _cost[a];
+    _cost[a] = _cost[b];
+    _cost[b] = tc;
+    final tn = _node[a];
+    _node[a] = _node[b];
+    _node[b] = tn;
+  }
+}
+
+/// ---------------------------------------------------------------------------
+/// Flood-aware, vehicle-aware router using true Dijkstra's algorithm.
+///
+/// Because OSRM returns a single polyline (a linear chain), running Dijkstra on
+/// it alone could only ever reproduce that same line or fail outright. To give
+/// Dijkstra genuine alternatives, this planner requests several OSRM route
+/// candidates, merges them into one graph with spatial cross-links, blocks any
+/// segment that grazes an impassable flood point, then lets Dijkstra stitch
+/// together the safest guaranteed path.
+/// ---------------------------------------------------------------------------
 class RoutePlanner {
-  static List<Map<String, dynamic>> sampleCctvDocuments() => [
-    {
-      'status': 'danger',
-      'water_level': 1.345,
-      'location': {
-        'type': 'Point',
-        'coordinates': [124.6433, 8.4822],
-      },
-      'timestamp': '2026-07-15T07:30:00Z',
-    },
-    {
-      'status': 'alert',
-      'water_level': 0.42,
-      'location': {
-        'type': 'Point',
-        'coordinates': [124.6493, 8.4857],
-      },
-      'timestamp': '2026-07-15T07:31:00Z',
-    },
-    {
-      'status': 'safe',
-      'water_level': 0.08,
-      'location': {
-        'type': 'Point',
-        'coordinates': [124.6476, 8.4872],
-      },
-      'timestamp': '2026-07-15T07:32:00Z',
-    },
-    {
-      'status': 'danger',
-      'water_level': 0.95,
-      'location': {
-        'type': 'Point',
-        'coordinates': [124.6530, 8.4838],
-      },
-      'timestamp': '2026-07-15T07:33:00Z',
-    },
-    {
-      'status': 'safe',
-      'water_level': 0.05,
-      'location': {
-        'type': 'Point',
-        'coordinates': [124.6501, 8.4818],
-      },
-      'timestamp': '2026-07-15T07:34:00Z',
-    },
-    {
-      'status': 'alert',
-      'water_level': 0.3,
-      'location': {
-        'type': 'Point',
-        'coordinates': [124.6512, 8.4900],
-      },
-      'timestamp': '2026-07-15T07:35:00Z',
-    },
-  ];
+  /// A flood point within this many meters of a segment influences that
+  /// segment's cost (or blocks it entirely).
+  static const double _detectRadiusM = 80.0;
+
+  /// Points from different OSRM alternatives closer than this are linked so
+  /// Dijkstra can switch between candidate roads at crossover points.
+  static const double _crossLinkRadiusM = 35.0;
+
+  /// Multiplier applied to a segment that passes a *passable* ALERT zone, so
+  /// Dijkstra prefers a fully-normal alternative when one exists.
+  static const double _alertPenalty = 6.0;
 
   static Future<RoutePlanResult?> planRoute({
     required LatLng origin,
     required LatLng destination,
     required VehicleType vehicleType,
   }) async {
-    // Fetch live CCTV data from MongoDB via backend API
+    // 1. Fetch live CCTV flood data from MongoDB via the backend API.
     final cctvDocs = await CctvService.fetchCctvData();
     final seedNodes = _seedNodes(cctvDocs);
-    final avoidableNodes = seedNodes.where((node) => !node.isPassableFor(vehicleType)).toList();
+    final avoidableNodes =
+        seedNodes.where((n) => !n.isPassableFor(vehicleType)).toList();
+    final hazardNodes = seedNodes.where((n) {
+      final s = n.status.toUpperCase();
+      return s == 'DANGER' || s == 'ALERT';
+    }).toList();
 
-    print('🚗 [Route] Planning route for ${vehicleType.label}');
-    print('🚗 [Route] Total CCTV nodes: ${seedNodes.length}');
-    print('🚗 [Route] Impassable nodes: ${avoidableNodes.length}');
+    // 2. Fetch OSRM candidate routes (primary + alternatives).
+    final routes = <_OsrmRoute>[...await _fetchOsrmRoutes(origin, destination)];
+    if (routes.isEmpty) return null;
 
-    // Determine the OSRM profile based on vehicle type.
-    final profile = _osrmProfile(vehicleType);
-
-    // First attempt: get direct route
-    var polyline = await _fetchRoadPolyline(
-      origin: origin,
-      destination: destination,
-      profile: profile,
-    );
-
-    if (polyline.isEmpty) {
-      return null;
-    }
-
-    // Check if route passes through dangerous areas
-    var dangerousNodesOnRoute = _findDangerousNodesOnRoute(
-      polyline: polyline,
-      avoidableNodes: avoidableNodes,
-    );
-
-    print('🚗 [Route] Dangerous nodes on initial route: ${dangerousNodesOnRoute.length}');
-
-    // If route passes through danger, try to re-route with avoidance waypoints
-    if (dangerousNodesOnRoute.isNotEmpty) {
-      final avoidanceWaypoints = _generateAvoidanceWaypoints(
+    // 2b. If any candidate grazes an impassable flood point, actively request
+    //     detour routes that steer OSRM around those points via offset
+    //     waypoints. OSRM's own alternatives often all funnel through the same
+    //     choke point on straight roads, so without this Dijkstra would have no
+    //     genuinely safe candidate to choose.
+    final dangersOnRoute =
+        _dangersNearCandidates(routes, avoidableNodes, 120.0);
+    if (dangersOnRoute.isNotEmpty) {
+      final detours = await _fetchDetourRoutes(
         origin: origin,
         destination: destination,
-        dangerousNodes: dangerousNodesOnRoute,
+        dangers: dangersOnRoute,
       );
+      routes.addAll(detours);
+    }
 
-      if (avoidanceWaypoints.isNotEmpty) {
-        print('🚗 [Route] Attempting re-route with ${avoidanceWaypoints.length} waypoints');
-        
-        final reroutedPolyline = await _fetchRoadPolylineWithWaypoints(
-          origin: origin,
-          destination: destination,
-          waypoints: avoidanceWaypoints,
-          profile: profile,
+    // 3. Build one merged graph from all candidates.
+    final nodes = <LatLng>[];
+    final adj = <List<_Edge>>[];
+    final nodeRoute = <int>[]; // which OSRM candidate a node belongs to (-1 = endpoint)
+
+    int addNode(LatLng p, int route) {
+      nodes.add(p);
+      adj.add(<_Edge>[]);
+      nodeRoute.add(route);
+      return nodes.length - 1;
+    }
+
+    void link(int a, int b, double w, bool alert) {
+      adj[a].add(_Edge(b, w, alert));
+      adj[b].add(_Edge(a, w, alert));
+    }
+
+    final startIdx = <int>[];
+    final endIdx = <int>[];
+
+    for (var r = 0; r < routes.length; r++) {
+      final pts = routes[r].points;
+      final idxs = List<int>.generate(pts.length, (k) => addNode(pts[k], r));
+      startIdx.add(idxs.first);
+      endIdx.add(idxs.last);
+      for (var i = 0; i < idxs.length - 1; i++) {
+        final sw = _segmentWeight(
+          nodes[idxs[i]],
+          nodes[idxs[i + 1]],
+          hazardNodes,
+          vehicleType,
         );
-
-        if (reroutedPolyline.isNotEmpty) {
-          // Check if new route is safer
-          final newDangerousNodes = _findDangerousNodesOnRoute(
-            polyline: reroutedPolyline,
-            avoidableNodes: avoidableNodes,
-          );
-
-          print('🚗 [Route] Dangerous nodes on re-routed path: ${newDangerousNodes.length}');
-
-          // Use re-routed path if it's safer (fewer dangerous nodes)
-          if (newDangerousNodes.length < dangerousNodesOnRoute.length) {
-            polyline = reroutedPolyline;
-            dangerousNodesOnRoute = newDangerousNodes;
-            print('✅ [Route] Re-route successful! Safer path found.');
-          } else {
-            print('⚠️ [Route] Re-route did not improve safety. Using original route.');
-          }
+        // Blocked segments simply get no edge, so Dijkstra can never use them.
+        if (sw.weight.isFinite) {
+          link(idxs[i], idxs[i + 1], sw.weight, sw.isAlert);
         }
       }
     }
 
-    final durationMinutes = await _fetchRouteDuration(
-      origin: origin,
-      destination: destination,
-      profile: profile,
-    );
+    // 4. Cross-link nearby points from different candidates so Dijkstra can
+    //    switch roads mid-route to escape a flooded segment.
+    _addCrossLinks(nodes, nodeRoute, hazardNodes, vehicleType, link);
+
+    // 5. Add explicit origin/destination super-nodes wired to every candidate.
+    final src = addNode(origin, -1);
+    final dst = addNode(destination, -1);
+    for (final s in startIdx) {
+      final sw = _segmentWeight(origin, nodes[s], hazardNodes, vehicleType);
+      if (sw.weight.isFinite) link(src, s, sw.weight, sw.isAlert);
+    }
+    for (final e in endIdx) {
+      final sw = _segmentWeight(nodes[e], destination, hazardNodes, vehicleType);
+      if (sw.weight.isFinite) link(dst, e, sw.weight, sw.isAlert);
+    }
+
+    // 6. Run Dijkstra to find the safest guaranteed path.
+    final dijkstra = _dijkstra(adj, src, dst);
 
     final originNode = RouteNode(
       id: 'origin',
@@ -266,7 +343,7 @@ class RoutePlanner {
       roadName: 'Your location',
       location: origin,
       status: 'SAFE',
-      waterLevelCm: 0,
+      waterLevelM: 0.0,
       connectedIds: const [],
     );
     final destinationNode = RouteNode(
@@ -275,256 +352,361 @@ class RoutePlanner {
       roadName: 'Selected destination',
       location: destination,
       status: 'SAFE',
-      waterLevelCm: 0,
+      waterLevelM: 0.0,
       connectedIds: const [],
     );
 
-    final distance = _sumDistance(polyline);
+    // 7a. No fully-safe path survives the flood blocks. Rather than fail
+    //     silently, fall back to the primary OSRM route so the user still sees
+    //     a line, but flag it clearly as not safe.
+    if (dijkstra == null) {
+      final fallback = routes.first.points;
+      final fbDistM = _sumMeters(fallback);
+      final fbSpeed = routes.first.durationSeconds > 0
+          ? routes.first.distanceMeters / routes.first.durationSeconds
+          : 8.33;
+      final fbKm = fbDistM / 1000.0;
+      final fbMin = (fbSpeed > 0 ? fbDistM / fbSpeed : 0.0) / 60.0;
+      return RoutePlanResult(
+        path: [originNode, destinationNode],
+        distanceKm: fbKm,
+        durationMinutes: fbMin,
+        avoidedNodes: avoidableNodes,
+        polyline: fallback,
+        summary:
+            '${fbKm.toStringAsFixed(1)} km · ${RoutePlanResult.formatEta(fbMin)}',
+        isFullySafe: false,
+        warningMessage:
+            'No fully safe route found for your vehicle. Showing the best available route — flooded areas may be present. Proceed with extreme caution.',
+      );
+    }
+
+    // 7b. Assemble the winning polyline and derived metrics.
+    final routePoints = dijkstra.path.map((i) => nodes[i]).toList();
+    final chosenDistanceM = _sumMeters(routePoints);
+
+    // Estimate duration using the primary candidate's average speed.
+    final primary = routes.first;
+    final avgSpeed = primary.durationSeconds > 0
+        ? primary.distanceMeters / primary.durationSeconds
+        : 8.33; // ~30 km/h fallback
+    final durationSec = avgSpeed > 0 ? chosenDistanceM / avgSpeed : 0.0;
+    final distanceKm = chosenDistanceM / 1000.0;
+    final durationMinutes = durationSec / 60.0;
+
+    final warning = dijkstra.hasAlert
+        ? 'Route passes through a flood alert zone. Proceed with caution for your vehicle type.'
+        : null;
 
     return RoutePlanResult(
       path: [originNode, destinationNode],
-      distanceKm: distance,
+      distanceKm: distanceKm,
       durationMinutes: durationMinutes,
       avoidedNodes: avoidableNodes,
-      polyline: polyline,
-      summary: '${distance.toStringAsFixed(1)} km · ${RoutePlanResult.formatEta(durationMinutes)}',
+      polyline: routePoints,
+      summary:
+          '${distanceKm.toStringAsFixed(1)} km · ${RoutePlanResult.formatEta(durationMinutes)}',
+      isFullySafe: !dijkstra.hasAlert,
+      warningMessage: warning,
     );
   }
 
-  /// Finds which impassable CCTV nodes the route passes through
-  static List<RouteNode> _findDangerousNodesOnRoute({
-    required List<LatLng> polyline,
-    required List<RouteNode> avoidableNodes,
-  }) {
-    const thresholdMeters = 150; // Within 150m of route = considered "on route"
-    final dangerousNodes = <RouteNode>[];
+  /// Links nearby points that belong to *different* OSRM candidates, forming
+  /// crossover junctions in the merged graph. Uses a coarse spatial hash grid
+  /// to stay close to O(n).
+  static void _addCrossLinks(
+    List<LatLng> nodes,
+    List<int> nodeRoute,
+    List<RouteNode> hazards,
+    VehicleType vehicle,
+    void Function(int a, int b, double w, bool alert) link,
+  ) {
+    final cellDeg = _crossLinkRadiusM / 111320.0; // meters → degrees (approx)
+    final grid = <String, List<int>>{};
 
-    for (final node in avoidableNodes) {
-      for (final point in polyline) {
-        final distanceMeters = const Distance().as(
-          LengthUnit.Meter,
-          node.location,
-          point,
-        );
-        if (distanceMeters <= thresholdMeters) {
-          dangerousNodes.add(node);
-          print('⚠️ [Route] Route passes near ${node.name} (${node.status}, ${node.waterLevelCm}cm)');
-          break;
+    String cellKey(int gx, int gy) => '$gx:$gy';
+
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodeRoute[i] < 0) continue; // skip endpoints (added later)
+      final gx = (nodes[i].longitude / cellDeg).floor();
+      final gy = (nodes[i].latitude / cellDeg).floor();
+      grid.putIfAbsent(cellKey(gx, gy), () => <int>[]).add(i);
+    }
+
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodeRoute[i] < 0) continue;
+      final gx = (nodes[i].longitude / cellDeg).floor();
+      final gy = (nodes[i].latitude / cellDeg).floor();
+      for (var dx = -1; dx <= 1; dx++) {
+        for (var dy = -1; dy <= 1; dy++) {
+          final bucket = grid[cellKey(gx + dx, gy + dy)];
+          if (bucket == null) continue;
+          for (final j in bucket) {
+            if (j <= i) continue; // add each pair once
+            if (nodeRoute[j] == nodeRoute[i]) continue; // only across candidates
+            final d = _haversine(nodes[i], nodes[j]);
+            if (d > _crossLinkRadiusM) continue;
+            final sw = _segmentWeight(nodes[i], nodes[j], hazards, vehicle);
+            if (sw.weight.isFinite) link(i, j, sw.weight, sw.isAlert);
+          }
+        }
+      }
+    }
+  }
+
+  /// Computes the cost of travelling between two points. Returns an infinite
+  /// weight (a hard block) if the segment grazes an impassable flood point.
+  static _SegWeight _segmentWeight(
+    LatLng a,
+    LatLng b,
+    List<RouteNode> hazards,
+    VehicleType vehicle,
+  ) {
+    final base = _haversine(a, b);
+    var weight = base;
+    var isAlert = false;
+    final mid = LatLng(
+      (a.latitude + b.latitude) / 2,
+      (a.longitude + b.longitude) / 2,
+    );
+
+    for (final n in hazards) {
+      final d = [
+        _haversine(a, n.location),
+        _haversine(b, n.location),
+        _haversine(mid, n.location),
+      ].reduce(min);
+
+      if (d <= _detectRadiusM) {
+        if (!n.isPassableFor(vehicle)) {
+          return const _SegWeight(double.infinity, false);
+        }
+        if (n.status.toUpperCase() == 'ALERT') {
+          weight = base * _alertPenalty;
+          isAlert = true;
+        }
+      }
+    }
+    return _SegWeight(weight, isAlert);
+  }
+
+  /// Classic Dijkstra shortest path with alert-flag propagation.
+  static _DijkstraResult? _dijkstra(List<List<_Edge>> adj, int src, int dst) {
+    final n = adj.length;
+    final dist = List<double>.filled(n, double.infinity);
+    final prev = List<int>.filled(n, -1);
+    final alertOnPath = List<bool>.filled(n, false);
+    dist[src] = 0;
+
+    final heap = _MinHeap();
+    heap.add(0.0, src);
+
+    while (!heap.isEmpty) {
+      final (cost, u) = heap.removeMin();
+      if (cost > dist[u]) continue;
+      if (u == dst) break;
+
+      for (final e in adj[u]) {
+        if (!e.weight.isFinite) continue;
+        final newCost = dist[u] + e.weight;
+        if (newCost < dist[e.to]) {
+          dist[e.to] = newCost;
+          prev[e.to] = u;
+          alertOnPath[e.to] = alertOnPath[u] || e.isAlert;
+          heap.add(newCost, e.to);
         }
       }
     }
 
-    return dangerousNodes;
+    if (dist[dst] == double.infinity) return null;
+
+    final path = <int>[];
+    var current = dst;
+    while (current != -1) {
+      path.insert(0, current);
+      current = prev[current];
+    }
+    return _DijkstraResult(path, dist[dst], alertOnPath[dst]);
   }
 
-  /// Generates intermediate waypoints to steer route around dangerous areas
-  static List<LatLng> _generateAvoidanceWaypoints({
+  /// Fetches OSRM candidate routes (primary + alternatives) as geometry lists.
+  static Future<List<_OsrmRoute>> _fetchOsrmRoutes(
+    LatLng origin,
+    LatLng destination,
+  ) async {
+    try {
+      final coords =
+          '${_formatCoordinate(origin)};${_formatCoordinate(destination)}';
+      final uri = Uri.parse(
+        'https://router.project-osrm.org/route/v1/driving/$coords'
+        '?overview=full&geometries=geojson&alternatives=3',
+      );
+
+      final response = await http.get(uri).timeout(const Duration(seconds: 15));
+      if (response.statusCode != 200) return const [];
+
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      final routes = body['routes'] as List<dynamic>?;
+      if (routes == null || routes.isEmpty) return const [];
+
+      final out = <_OsrmRoute>[];
+      for (final r in routes) {
+        final geometry = r['geometry'] as Map<String, dynamic>?;
+        final coordinates = geometry?['coordinates'] as List<dynamic>?;
+        if (coordinates == null || coordinates.isEmpty) continue;
+
+        final pts = <LatLng>[];
+        for (final c in coordinates) {
+          if (c is! List || c.length < 2) continue;
+          final lng = (c[0] as num).toDouble();
+          final lat = (c[1] as num).toDouble();
+          if (lat.abs() > 90 || lng.abs() > 180) continue;
+          pts.add(LatLng(lat, lng));
+        }
+        if (pts.length < 2) continue;
+
+        final dist = (r['distance'] as num?)?.toDouble() ?? 0;
+        final dur = (r['duration'] as num?)?.toDouble() ?? 0;
+        out.add(_OsrmRoute(pts, dist, dur));
+      }
+      return out;
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// Returns the impassable flood nodes that any candidate route passes near.
+  static List<RouteNode> _dangersNearCandidates(
+    List<_OsrmRoute> routes,
+    List<RouteNode> impassable,
+    double radiusM,
+  ) {
+    final found = <RouteNode>[];
+    for (final node in impassable) {
+      var near = false;
+      for (final route in routes) {
+        for (final p in route.points) {
+          if (_haversine(p, node.location) <= radiusM) {
+            near = true;
+            break;
+          }
+        }
+        if (near) break;
+      }
+      if (near) found.add(node);
+    }
+    return found;
+  }
+
+  /// Requests detour routes that steer around the given danger points by
+  /// injecting offset waypoints, then asking OSRM to route through them.
+  static Future<List<_OsrmRoute>> _fetchDetourRoutes({
     required LatLng origin,
     required LatLng destination,
-    required List<RouteNode> dangerousNodes,
-  }) {
-    if (dangerousNodes.isEmpty) return [];
+    required List<RouteNode> dangers,
+  }) async {
+    final results = <_OsrmRoute>[];
+    final bearing = _bearing(origin, destination);
 
-    final waypoints = <LatLng>[];
-    const offsetKm = 0.5; // Offset 500m to avoid danger zone
-
-    // Calculate the general direction of travel
-    final bearing = const Distance().bearing(
-      LatLng(origin.latitude, origin.longitude),
-      LatLng(destination.latitude, destination.longitude),
-    );
-
-    // For each dangerous node, create a waypoint that steers around it
-    for (final node in dangerousNodes) {
-      final dangerPoint = node.location;
-      
-      // Calculate perpendicular offset (left or right of route)
-      // Try both sides and pick the one farther from other danger zones
-      final leftOffset = _offsetPoint(dangerPoint, bearing + 90, offsetKm);
-      final rightOffset = _offsetPoint(dangerPoint, bearing - 90, offsetKm);
-
-      // Choose the offset point that's farther from all dangerous nodes
-      final leftScore = _minDistanceToNodes(leftOffset, dangerousNodes);
-      final rightScore = _minDistanceToNodes(rightOffset, dangerousNodes);
-
-      final waypoint = leftScore > rightScore ? leftOffset : rightOffset;
-      waypoints.add(waypoint);
-      
-      print('📍 [Route] Adding avoidance waypoint near ${node.name}');
+    // Try a couple of offset distances so at least one lands on a real
+    // parallel road that OSRM can follow around the danger.
+    for (final offsetKm in const [0.4, 0.8]) {
+      final waypoints = <LatLng>[];
+      for (final d in dangers) {
+        final left = _offsetPoint(d.location, bearing + 90, offsetKm);
+        final right = _offsetPoint(d.location, bearing - 90, offsetKm);
+        // Pick the side that stays farther from every danger point.
+        final leftClear = _minDistanceToNodes(left, dangers);
+        final rightClear = _minDistanceToNodes(right, dangers);
+        waypoints.add(leftClear > rightClear ? left : right);
+      }
+      waypoints.sort(
+        (a, b) => _haversine(origin, a).compareTo(_haversine(origin, b)),
+      );
+      final route =
+          await _fetchOsrmViaWaypoints(origin, destination, waypoints);
+      if (route != null) results.add(route);
     }
-
-    // Sort waypoints by distance from origin to ensure proper order
-    waypoints.sort((a, b) {
-      final distA = const Distance().as(LengthUnit.Kilometer, origin, a);
-      final distB = const Distance().as(LengthUnit.Kilometer, origin, b);
-      return distA.compareTo(distB);
-    });
-
-    return waypoints;
+    return results;
   }
 
-  /// Offsets a point by a given distance in a given bearing (in degrees)
-  static LatLng _offsetPoint(LatLng point, double bearingDeg, double distanceKm) {
+  /// Fetches a single OSRM route that passes through the given intermediate
+  /// waypoints (in order).
+  static Future<_OsrmRoute?> _fetchOsrmViaWaypoints(
+    LatLng origin,
+    LatLng destination,
+    List<LatLng> waypoints,
+  ) async {
+    try {
+      final all = <LatLng>[origin, ...waypoints, destination];
+      final coords = all.map(_formatCoordinate).join(';');
+      final uri = Uri.parse(
+        'https://router.project-osrm.org/route/v1/driving/$coords'
+        '?overview=full&geometries=geojson&alternatives=false',
+      );
+      final response = await http.get(uri).timeout(const Duration(seconds: 15));
+      if (response.statusCode != 200) return null;
+
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      final routes = body['routes'] as List<dynamic>?;
+      if (routes == null || routes.isEmpty) return null;
+
+      final geometry = routes.first['geometry'] as Map<String, dynamic>?;
+      final coordinates = geometry?['coordinates'] as List<dynamic>?;
+      if (coordinates == null || coordinates.isEmpty) return null;
+
+      final pts = <LatLng>[];
+      for (final c in coordinates) {
+        if (c is! List || c.length < 2) continue;
+        final lng = (c[0] as num).toDouble();
+        final lat = (c[1] as num).toDouble();
+        if (lat.abs() > 90 || lng.abs() > 180) continue;
+        pts.add(LatLng(lat, lng));
+      }
+      if (pts.length < 2) return null;
+
+      final dist = (routes.first['distance'] as num?)?.toDouble() ?? 0;
+      final dur = (routes.first['duration'] as num?)?.toDouble() ?? 0;
+      return _OsrmRoute(pts, dist, dur);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Offsets a point by [distanceKm] along the given [bearingDeg].
+  static LatLng _offsetPoint(
+    LatLng point,
+    double bearingDeg,
+    double distanceKm,
+  ) {
     const earthRadiusKm = 6371.0;
     final bearingRad = bearingDeg * pi / 180.0;
     final latRad = point.latitude * pi / 180.0;
     final lngRad = point.longitude * pi / 180.0;
-
-    final newLatRad = latRad + (distanceKm / earthRadiusKm) * cos(bearingRad);
-    final newLngRad = lngRad + (distanceKm / (earthRadiusKm * cos(latRad))) * sin(bearingRad);
-
-    return LatLng(
-      newLatRad * 180.0 / pi,
-      newLngRad * 180.0 / pi,
-    );
+    final newLat = latRad + (distanceKm / earthRadiusKm) * cos(bearingRad);
+    final newLng =
+        lngRad + (distanceKm / (earthRadiusKm * cos(latRad))) * sin(bearingRad);
+    return LatLng(newLat * 180.0 / pi, newLng * 180.0 / pi);
   }
 
-  /// Finds minimum distance from a point to any node in the list
+  /// Initial bearing (degrees) from [a] to [b].
+  static double _bearing(LatLng a, LatLng b) {
+    final lat1 = a.latitude * pi / 180.0;
+    final lat2 = b.latitude * pi / 180.0;
+    final dLng = (b.longitude - a.longitude) * pi / 180.0;
+    final y = sin(dLng) * cos(lat2);
+    final x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLng);
+    return (atan2(y, x) * 180.0 / pi + 360.0) % 360.0;
+  }
+
+  /// Minimum distance (meters) from [point] to any of [nodes].
   static double _minDistanceToNodes(LatLng point, List<RouteNode> nodes) {
     var minDist = double.infinity;
-    for (final node in nodes) {
-      final dist = const Distance().as(LengthUnit.Meter, point, node.location);
-      if (dist < minDist) minDist = dist;
+    for (final n in nodes) {
+      final d = _haversine(point, n.location);
+      if (d < minDist) minDist = d;
     }
     return minDist;
-  }
-
-  /// Fetches route with intermediate waypoints
-  static Future<List<LatLng>> _fetchRoadPolylineWithWaypoints({
-    required LatLng origin,
-    required LatLng destination,
-    required List<LatLng> waypoints,
-    String profile = 'driving',
-  }) async {
-    try {
-      final allCoords = <LatLng>[origin, ...waypoints, destination];
-      final coords = allCoords.map(_formatCoordinate).join(';');
-
-      final uri = Uri.parse(
-        'https://router.project-osrm.org/route/v1/$profile/$coords?overview=full&geometries=geojson&alternatives=false',
-      );
-
-      print('🌐 [Route] Requesting route with ${waypoints.length} waypoints');
-
-      final response = await http.get(uri).timeout(const Duration(seconds: 15));
-      if (response.statusCode != 200) {
-        return const [];
-      }
-
-      final body = jsonDecode(response.body) as Map<String, dynamic>;
-      final routes = body['routes'] as List<dynamic>?;
-      if (routes == null || routes.isEmpty) {
-        return const [];
-      }
-
-      final geometry = routes.first['geometry'] as Map<String, dynamic>?;
-      if (geometry == null) return const [];
-
-      final coordinates = geometry['coordinates'] as List<dynamic>?;
-      if (coordinates == null || coordinates.isEmpty) {
-        return const [];
-      }
-
-      final points = <LatLng>[];
-      for (final coord in coordinates) {
-        if (coord is! List || coord.length < 2) continue;
-        final lng = (coord[0] as num).toDouble();
-        final lat = (coord[1] as num).toDouble();
-        if (lat.abs() > 90 || lng.abs() > 180) continue;
-        points.add(LatLng(lat, lng));
-      }
-      return points;
-    } catch (e) {
-      print('❌ [Route] Waypoint routing failed: $e');
-      return const [];
-    }
-  }
-
-  static String _osrmProfile(VehicleType vehicleType) {
-    // OSRM public server only supports 'driving' profile
-    return 'driving';
-  }
-
-  static Future<List<LatLng>> _fetchRoadPolyline({
-    required LatLng origin,
-    required LatLng destination,
-    String profile = 'driving',
-  }) async {
-    try {
-      final coords = <String>[
-        _formatCoordinate(origin),
-        _formatCoordinate(destination),
-      ];
-
-      final uri = Uri.parse(
-        'https://router.project-osrm.org/route/v1/$profile/${coords.join(';')}?overview=full&geometries=geojson&alternatives=false',
-      );
-
-      final response = await http.get(uri).timeout(const Duration(seconds: 10));
-      if (response.statusCode != 200) {
-        return const [];
-      }
-
-      final body = jsonDecode(response.body) as Map<String, dynamic>;
-      final routes = body['routes'] as List<dynamic>?;
-      if (routes == null || routes.isEmpty) {
-        return const [];
-      }
-
-      final geometry = routes.first['geometry'] as Map<String, dynamic>?;
-      if (geometry == null) return const [];
-
-      final coordinates = geometry['coordinates'] as List<dynamic>?;
-      if (coordinates == null || coordinates.isEmpty) {
-        return const [];
-      }
-
-      // GeoJSON returns [ [lng, lat], [lng, lat], ... ]
-      final points = <LatLng>[];
-      for (final coord in coordinates) {
-        if (coord is! List || coord.length < 2) continue;
-        final lng = (coord[0] as num).toDouble();
-        final lat = (coord[1] as num).toDouble();
-        // Validate coordinate ranges
-        if (lat.abs() > 90 || lng.abs() > 180) continue;
-        points.add(LatLng(lat, lng));
-      }
-      return points;
-    } catch (_) {
-      return const [];
-    }
-  }
-
-  /// Fetches the travel duration (in minutes) for the route.
-  static Future<double> _fetchRouteDuration({
-    required LatLng origin,
-    required LatLng destination,
-    String profile = 'driving',
-  }) async {
-    try {
-      final coords = <String>[
-        _formatCoordinate(origin),
-        _formatCoordinate(destination),
-      ];
-
-      final uri = Uri.parse(
-        'https://router.project-osrm.org/route/v1/$profile/${coords.join(';')}?overview=false',
-      );
-
-      final response = await http.get(uri).timeout(const Duration(seconds: 10));
-      if (response.statusCode != 200) return 0;
-
-      final body = jsonDecode(response.body) as Map<String, dynamic>;
-      final routes = body['routes'] as List<dynamic>?;
-      if (routes == null || routes.isEmpty) return 0;
-
-      final durationSec = routes.first['duration'] as num?;
-      if (durationSec == null) return 0;
-
-      return durationSec.toDouble() / 60.0; // convert seconds → minutes
-    } catch (_) {
-      return 0;
-    }
   }
 
   static String _formatCoordinate(LatLng point) {
@@ -539,7 +721,7 @@ class RoutePlanner {
       final longitude = coordinates[0] as num;
       final latitude = coordinates[1] as num;
       final status = (doc['status'] as String).toUpperCase();
-      final waterLevelCm = ((doc['water_level'] as num) * 100).round();
+      final waterLevelM = (doc['water_level'] as num).toDouble();
 
       return RouteNode(
         id: 'c${index + 1}',
@@ -547,22 +729,30 @@ class RoutePlanner {
         roadName: 'CCTV node ${index + 1}',
         location: LatLng(latitude.toDouble(), longitude.toDouble()),
         status: status,
-        waterLevelCm: waterLevelCm,
+        waterLevelM: waterLevelM,
         connectedIds: const [],
       );
     }).toList();
   }
 
-  static double _sumDistance(List<LatLng> points) {
+  static double _sumMeters(List<LatLng> points) {
     var total = 0.0;
     for (var i = 1; i < points.length; i++) {
-      total += _distanceKm(points[i - 1], points[i]);
+      total += _haversine(points[i - 1], points[i]);
     }
     return total;
   }
 
-  static double _distanceKm(LatLng from, LatLng to) {
-    final distance = const Distance();
-    return distance.as(LengthUnit.Kilometer, from, to);
+  /// Great-circle distance between two points, in meters.
+  static double _haversine(LatLng a, LatLng b) {
+    const earthRadiusM = 6371000.0;
+    final lat1 = a.latitude * pi / 180.0;
+    final lat2 = b.latitude * pi / 180.0;
+    final dLat = (b.latitude - a.latitude) * pi / 180.0;
+    final dLng = (b.longitude - a.longitude) * pi / 180.0;
+
+    final h = sin(dLat / 2) * sin(dLat / 2) +
+        cos(lat1) * cos(lat2) * sin(dLng / 2) * sin(dLng / 2);
+    return earthRadiusM * 2 * atan2(sqrt(h), sqrt(1 - h));
   }
 }

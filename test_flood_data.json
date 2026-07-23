@@ -1,0 +1,182 @@
+[
+  {
+    "status": "danger",
+    "water_level": 1.345,
+    "location": {
+      "type": "Point",
+      "coordinates": [124.6433, 8.4822]
+    },
+    "timestamp": "2026-07-20T07:30:00Z"
+  },
+  {
+    "status": "danger",
+    "water_level": 1.12,
+    "location": {
+      "type": "Point",
+      "coordinates": [124.6450, 8.4835]
+    },
+    "timestamp": "2026-07-20T07:31:00Z"
+  },
+  {
+    "status": "danger",
+    "water_level": 0.98,
+    "location": {
+      "type": "Point",
+      "coordinates": [124.6480, 8.4860]
+    },
+    "timestamp": "2026-07-20T07:32:00Z"
+  },
+  {
+    "status": "alert",
+    "water_level": 0.75,
+    "location": {
+      "type": "Point",
+      "coordinates": [124.6493, 8.4857]
+    },
+    "timestamp": "2026-07-20T07:33:00Z"
+  },
+  {
+    "status": "alert",
+    "water_level": 0.65,
+    "location": {
+      "type": "Point",
+      "coordinates": [124.6510, 8.4870]
+    },
+    "timestamp": "2026-07-20T07:34:00Z"
+  },
+  {
+    "status": "alert",
+    "water_level": 0.55,
+    "location": {
+      "type": "Point",
+      "coordinates": [124.6525, 8.4885]
+    },
+    "timestamp": "2026-07-20T07:35:00Z"
+  },
+  {
+    "status": "alert",
+    "water_level": 0.45,
+    "location": {
+      "type": "Point",
+      "coordinates": [124.6460, 8.4845]
+    },
+    "timestamp": "2026-07-20T07:36:00Z"
+  },
+  {
+    "status": "safe",
+    "water_level": 0.08,
+    "location": {
+      "type": "Point",
+      "coordinates": [124.6476, 8.4872]
+    },
+    "timestamp": "2026-07-20T07:37:00Z"
+  },
+  {
+    "status": "safe",
+    "water_level": 0.12,
+    "location": {
+      "type": "Point",
+      "coordinates": [124.6501, 8.4818]
+    },
+    "timestamp": "2026-07-20T07:38:00Z"
+  },
+  {
+    "status": "safe",
+    "water_level": 0.05,
+    "location": {
+      "type": "Point",
+      "coordinates": [124.6540, 8.4890]
+    },
+    "timestamp": "2026-07-20T07:39:00Z"
+  },
+  {
+    "status": "safe",
+    "water_level": 0.10,
+    "location": {
+      "type": "Point",
+      "coordinates": [124.6555, 8.4905]
+    },
+    "timestamp": "2026-07-20T07:40:00Z"
+  },
+  {
+    "status": "safe",
+    "water_level": 0.03,
+    "location": {
+      "type": "Point",
+      "coordinates": [124.6420, 8.4810]
+    },
+    "timestamp": "2026-07-20T07:41:00Z"
+  },
+  {
+    "status": "danger",
+    "water_level": 1.05,
+    "location": {
+      "type": "Point",
+      "coordinates": [124.6530, 8.4838]
+    },
+    "timestamp": "2026-07-20T07:42:00Z"
+  },
+  {
+    "status": "alert",
+    "water_level": 0.35,
+    "location": {
+      "type": "Point",
+      "coordinates": [124.6512, 8.4900]
+    },
+    "timestamp": "2026-07-20T07:43:00Z"
+  },
+  {
+    "status": "safe",
+    "water_level": 0.15,
+    "location": {
+      "type": "Point",
+      "coordinates": [124.6565, 8.4850]
+    },
+    "timestamp": "2026-07-20T07:44:00Z"
+  },
+  {
+    "status": "safe",
+    "water_level": 0.08,
+    "location": {
+      "type": "Point",
+      "coordinates": [124.6440, 8.4895]
+    },
+    "timestamp": "2026-07-20T07:45:00Z"
+  },
+  {
+    "status": "alert",
+    "water_level": 0.50,
+    "location": {
+      "type": "Point",
+      "coordinates": [124.6470, 8.4830]
+    },
+    "timestamp": "2026-07-20T07:46:00Z"
+  },
+  {
+    "status": "danger",
+    "water_level": 1.20,
+    "location": {
+      "type": "Point",
+      "coordinates": [124.6495, 8.4845]
+    },
+    "timestamp": "2026-07-20T07:47:00Z"
+  },
+  {
+    "status": "safe",
+    "water_level": 0.06,
+    "location": {
+      "type": "Point",
+      "coordinates": [124.6520, 8.4865]
+    },
+    "timestamp": "2026-07-20T07:48:00Z"
+  },
+  {
+    "status": "safe",
+    "water_level": 0.09,
+    "location": {
+      "type": "Point",
+      "coordinates": [124.6545, 8.4875]
+    },
+    "timestamp": "2026-07-20T07:49:00Z"
+  }
+]

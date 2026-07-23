@@ -12,7 +12,7 @@ import '../theme/app_colors.dart';
 class VehicleType {
   final String name;
   final IconData icon;
-  final double maxPassableHeight; // cm — above this = unpassable
+  final double maxPassableHeight; // meters — above this = unpassable
 
   const VehicleType({
     required this.name,
@@ -25,11 +25,11 @@ class VehicleType {
 
 // Thresholds based on typical vehicle ground clearance + safety margin
 const _vehicleTypes = [
-  VehicleType(name: 'Bicycle',    icon: Icons.pedal_bike,        maxPassableHeight: 15),
-  VehicleType(name: 'Motorcycle', icon: Icons.two_wheeler,       maxPassableHeight: 25),
-  VehicleType(name: 'Sedan / Car',icon: Icons.directions_car,    maxPassableHeight: 40),
-  VehicleType(name: 'SUV / Van',  icon: Icons.airport_shuttle,   maxPassableHeight: 65),
-  VehicleType(name: 'Truck / Bus',icon: Icons.local_shipping,    maxPassableHeight: 90),
+  VehicleType(name: 'Bicycle',    icon: Icons.pedal_bike,        maxPassableHeight: 0.15),
+  VehicleType(name: 'Motorcycle', icon: Icons.two_wheeler,       maxPassableHeight: 0.25),
+  VehicleType(name: 'Sedan / Car',icon: Icons.directions_car,    maxPassableHeight: 0.40),
+  VehicleType(name: 'SUV / Van',  icon: Icons.airport_shuttle,   maxPassableHeight: 0.65),
+  VehicleType(name: 'Truck / Bus',icon: Icons.local_shipping,    maxPassableHeight: 0.90),
 ];
 
 // ── Data model ────────────────────────────────────────────────────────────────
@@ -135,7 +135,7 @@ class _MapScreenState extends State<MapScreen> {
         _cctvLocations = docs.asMap().entries.map((entry) {
           final cctv = _convertDocToCctv(entry.key, entry.value);
           print('📍 [Map] CCTV #${entry.key + 1}: status=${cctv.status}, '
-              'waterLevel=${cctv.floodHeight}cm, '
+              'waterLevel=${cctv.floodHeight}m, '
               'position=${cctv.position.latitude},${cctv.position.longitude}');
           return cctv;
         }).toList();
@@ -164,13 +164,13 @@ class _MapScreenState extends State<MapScreen> {
     final status = rawStatus == 'danger'
         ? 'DANGER'
         : (rawStatus == 'alert' ? 'ALERT' : 'NORMAL');
-    final waterLevelMeters = (doc['water_level'] as num?)?.toDouble() ?? 0;
-    final floodHeight = (waterLevelMeters * 100).roundToDouble(); // Convert meters → cm
+    // water_level from database is in meters
+    final floodHeight = (doc['water_level'] as num?)?.toDouble() ?? 0;
     final timestamp = doc['timestamp'] as String?;
     final lastUpdated = _formatTimestamp(timestamp);
 
     print('🔄 [Convert] Doc #$index: raw_status=$rawStatus → $status, '
-        'water_level=${waterLevelMeters}m → ${floodHeight}cm, '
+        'water_level=${floodHeight}m, '
         'coords=[$longitude,$latitude]');
 
     return CctvLocation(
@@ -1001,7 +1001,7 @@ class _CctvBottomSheet extends StatelessWidget {
                       style: TextStyle(
                           fontSize: 10, color: AppColors.textMuted)),
                     Text(
-                      '${location.floodHeight.toInt()} cm',
+                      '${location.floodHeight.toStringAsFixed(2)} m',
                       style: const TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.w700,
@@ -1104,7 +1104,7 @@ class _VehicleRow extends StatelessWidget {
           ),
           // Threshold hint
           Text(
-            '≤ ${vehicle.maxPassableHeight.toInt()} cm',
+            '≤ ${vehicle.maxPassableHeight.toStringAsFixed(2)} m',
             style: const TextStyle(
                 fontSize: 10, color: AppColors.textMuted),
           ),
