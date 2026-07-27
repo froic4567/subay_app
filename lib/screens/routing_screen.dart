@@ -55,6 +55,10 @@ class _RoutingScreenState extends State<RoutingScreen> {
   bool _suppressOriginSearch = false;
   bool _suppressDestSearch = false;
 
+  // GPS tracking for navigation
+  Stream<Position>? _positionStream;
+  LatLng? _currentPosition;
+
   // Default location (Cagayan de Oro, Philippines)
   final LatLng _defaultLocation = LatLng(8.4866, 124.6500);
 
@@ -85,6 +89,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
     _originDebounce?.cancel();
     _destDebounce?.cancel();
     _rerouteTimer?.cancel();
+    _positionStream = null;
     _destController.dispose();
     _originController.dispose();
     _mapController.dispose();
@@ -337,6 +342,50 @@ class _RoutingScreenState extends State<RoutingScreen> {
     _rerouteTimer = null;
   }
 
+  /// Starts GPS position tracking for navigation mode.
+  void _startGpsTracking() async {
+    try {
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) return;
+
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        return;
+      }
+
+      // Start listening to position updates
+      _positionStream = Geolocator.getPositionStream(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          distanceFilter: 10, // Update every 10 meters
+        ),
+      );
+
+      _positionStream?.listen((Position position) {
+        if (!mounted) return;
+        final newLatLng = LatLng(position.latitude, position.longitude);
+        setState(() {
+          _currentPosition = newLatLng;
+        });
+        // Follow the user's position on the map
+        _mapController.move(newLatLng, _mapController.camera.zoom);
+      });
+    } catch (_) {
+      // GPS tracking failed silently
+    }
+  }
+
+  void _stopGpsTracking() {
+    _positionStream = null;
+    setState(() {
+      _currentPosition = null;
+    });
+  }
+
   Future<void> _checkForReroute() async {
     if (_routePlanResult == null) return;
 
@@ -451,6 +500,44 @@ class _RoutingScreenState extends State<RoutingScreen> {
             Icons.location_on,
             color: AppColors.danger,
             size: 36,
+          ),
+        ),
+      );
+    }
+    // Current GPS position marker (shown during navigation)
+    if (_currentPosition != null) {
+      markers.add(
+        Marker(
+          point: _currentPosition!,
+          width: 40,
+          height: 40,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: Colors.blue.withValues(alpha: 0.2),
+                  shape: BoxShape.circle,
+                ),
+              ),
+              Container(
+                width: 20,
+                height: 20,
+                decoration: BoxDecoration(
+                  color: Colors.blue,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.white, width: 3),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.blue.withValues(alpha: 0.5),
+                      blurRadius: 8,
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
         ),
       );
@@ -740,6 +827,8 @@ class _RoutingScreenState extends State<RoutingScreen> {
                           _navigationStarted = false;
                           _routeFound = true;
                         });
+                        // Stop GPS tracking
+                        _stopGpsTracking();
                       },
                       icon: const Icon(Icons.stop_rounded, size: 18),
                       label: const Text(
@@ -826,7 +915,14 @@ class _RoutingScreenState extends State<RoutingScreen> {
             top: topPad,
             left: 0,
             right: 0,
-            child: Container(
+            child: GestureDetector(
+              onTap: () {
+                // Hide the bottom sheet when interacting with search panel
+                if (_routeFound) {
+                  setState(() => _routeFound = false);
+                }
+              },
+              child: Container(
               decoration: BoxDecoration(
                 color: Colors.white,
                 boxShadow: [
@@ -890,6 +986,12 @@ class _RoutingScreenState extends State<RoutingScreen> {
                             : AppColors.normal.withValues(alpha: 0.2),
                         onTap: () {
                           setState(() {
+                            // Exit navigation mode if active to allow pin editing
+                            if (_navigationStarted) {
+                              _navigationStarted = false;
+                            }
+                            // Hide the bottom sheet when selecting pins
+                            _routeFound = false;
                             _selectingOrigin = !_selectingOrigin;
                             _selectingDestination = false;
                             _showOriginSuggestions = false;
@@ -1016,6 +1118,12 @@ class _RoutingScreenState extends State<RoutingScreen> {
                         child: InkWell(
                           onTap: () {
                             setState(() {
+                              // Exit navigation mode if active to allow pin editing
+                              if (_navigationStarted) {
+                                _navigationStarted = false;
+                              }
+                              // Hide the bottom sheet when selecting pins
+                              _routeFound = false;
                               _selectingDestination = !_selectingDestination;
                               _selectingOrigin = false;
                               _showOriginSuggestions = false;
@@ -1060,6 +1168,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
                 ],
               ),
             ),
+            ),
           ),
 
           // ── ROUTE RESULT BOTTOM SHEET ────────────────────────────────────────
@@ -1077,6 +1186,8 @@ class _RoutingScreenState extends State<RoutingScreen> {
                   // Focus on user's origin area like Google Maps navigation mode
                   final focusPoint = _originLatLng ?? _defaultLocation;
                   _mapController.move(focusPoint, 17);
+                  // Start GPS tracking
+                  _startGpsTracking();
                 },
                 routeResult: _routePlanResult,
               ),
