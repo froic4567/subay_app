@@ -38,6 +38,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
 
   // CCTV data fetched from MongoDB via backend API
   List<Map<String, dynamic>> _cctvDocs = [];
+  List<Map<String, dynamic>> _lastRoutedCctvSnapshot = [];
 
   // Search state
   Timer? _originDebounce;
@@ -309,6 +310,11 @@ class _RoutingScreenState extends State<RoutingScreen> {
 
     if (!mounted) return;
 
+    if (result != null) {
+      _lastRoutedCctvSnapshot =
+          List<Map<String, dynamic>>.from(RoutePlanner.lastCctvSnapshot);
+    }
+
     setState(() {
       _routePlanResult = result;
       _routeFound = result != null;
@@ -396,12 +402,30 @@ class _RoutingScreenState extends State<RoutingScreen> {
       return;
     }
 
+    // Detect flood-status change before recomputing the route.
+    final floodChangeDetectedAt = DateTime.now();
+    final currentCctv = await CctvService.fetchCctvData();
+    final floodChanged = _cctvDataChanged(_lastRoutedCctvSnapshot, currentCctv);
+    if (!floodChanged) return;
+
+    final previousSnapshot =
+        List<Map<String, dynamic>>.from(_lastRoutedCctvSnapshot);
+
     final newResult = await RoutePlanner.planRoute(
       origin: origin,
       destination: destination,
       vehicleType: _selectedVehicleType,
+      context: RouteRequestContext(
+        isReroute: true,
+        floodChangeDetectedAt: floodChangeDetectedAt,
+        previousCctvDocs: previousSnapshot,
+      ),
     );
     if (!mounted || newResult == null) return;
+
+    _lastRoutedCctvSnapshot =
+        List<Map<String, dynamic>>.from(RoutePlanner.lastCctvSnapshot);
+    if (mounted) setState(() => _cctvDocs = RoutePlanner.lastCctvSnapshot);
 
     final previous = _routePlanResult;
     // Only surface an update when the safety picture meaningfully changed.
@@ -416,6 +440,24 @@ class _RoutingScreenState extends State<RoutingScreen> {
       _routeFound = true;
     });
     _showRerouteSnackbar();
+  }
+
+  /// Returns true when any CCTV feed status or water level changed.
+  bool _cctvDataChanged(
+    List<Map<String, dynamic>> previous,
+    List<Map<String, dynamic>> current,
+  ) {
+    if (previous.isEmpty) return current.isNotEmpty;
+    if (previous.length != current.length) return true;
+
+    for (var i = 0; i < current.length; i++) {
+      final prevStatus = (previous[i]['status'] as String?)?.toLowerCase();
+      final curStatus = (current[i]['status'] as String?)?.toLowerCase();
+      final prevLevel = (previous[i]['water_level'] as num?)?.toDouble();
+      final curLevel = (current[i]['water_level'] as num?)?.toDouble();
+      if (prevStatus != curStatus || prevLevel != curLevel) return true;
+    }
+    return false;
   }
 
   void _showRerouteSnackbar() {

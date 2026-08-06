@@ -4,6 +4,20 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 import 'cctv_service.dart';
+import 'routing_test_logger.dart';
+
+/// Optional context for route requests triggered by flood-status changes.
+class RouteRequestContext {
+  final bool isReroute;
+  final DateTime? floodChangeDetectedAt;
+  final List<Map<String, dynamic>>? previousCctvDocs;
+
+  const RouteRequestContext({
+    this.isReroute = false,
+    this.floodChangeDetectedAt,
+    this.previousCctvDocs,
+  });
+}
 
 /// Vehicle types available for route planning.
 /// Thresholds match the passability table shown in map_screen.dart
@@ -167,6 +181,21 @@ class _DijkstraResult {
   const _DijkstraResult(this.path, this.cost, this.hasAlert);
 }
 
+/// Built routing graph ready for Dijkstra.
+class _GraphBuildResult {
+  final List<LatLng> nodes;
+  final List<List<_Edge>> adj;
+  final int src;
+  final int dst;
+
+  const _GraphBuildResult({
+    required this.nodes,
+    required this.adj,
+    required this.src,
+    required this.dst,
+  });
+}
+
 /// A compact binary min-heap keyed by cost. Avoids adding a new dependency
 /// just for a priority queue.
 class _MinHeap {
@@ -232,6 +261,9 @@ class _MinHeap {
 /// together the safest guaranteed path.
 /// ---------------------------------------------------------------------------
 class RoutePlanner {
+  /// Most recent CCTV payload fetched during routing (for reroute snapshots).
+  static List<Map<String, dynamic>> lastCctvSnapshot = [];
+
   /// A flood point within this many meters of a segment influences that
   /// segment's cost (or blocks it entirely).
   static const double _detectRadiusM = 80.0;
@@ -248,9 +280,21 @@ class RoutePlanner {
     required LatLng origin,
     required LatLng destination,
     required VehicleType vehicleType,
+    RouteRequestContext? context,
   }) async {
+    final pathGenStopwatch = Stopwatch()..start();
+    var dbFetchTime = Duration.zero;
+    var osrmFetchTime = Duration.zero;
+    var graphConstructionTime = Duration.zero;
+    var dijkstraTime = Duration.zero;
+
     // 1. Fetch live CCTV flood data from MongoDB via the backend API.
+    final dbStopwatch = Stopwatch()..start();
     final cctvDocs = await CctvService.fetchCctvData();
+    dbStopwatch.stop();
+    dbFetchTime = dbStopwatch.elapsed;
+    lastCctvSnapshot = List<Map<String, dynamic>>.from(cctvDocs);
+
     final seedNodes = _seedNodes(cctvDocs);
     final avoidableNodes =
         seedNodes.where((n) => !n.isPassableFor(vehicleType)).toList();
@@ -258,10 +302,36 @@ class RoutePlanner {
       final s = n.status.toUpperCase();
       return s == 'DANGER' || s == 'ALERT';
     }).toList();
+    final dangerNodes = seedNodes
+        .where((n) => n.status.toUpperCase() == 'DANGER')
+        .toList();
 
     // 2. Fetch OSRM candidate routes (primary + alternatives).
+    final osrmStopwatch = Stopwatch()..start();
     final routes = <_OsrmRoute>[...await _fetchOsrmRoutes(origin, destination)];
-    if (routes.isEmpty) return null;
+    if (routes.isEmpty) {
+      pathGenStopwatch.stop();
+      _emitRoutingLog(
+        origin: origin,
+        destination: destination,
+        context: context,
+        pathGenerationLatency: pathGenStopwatch.elapsed,
+        graphConstructionTime: graphConstructionTime,
+        dbFetchTime: dbFetchTime,
+        osrmFetchTime: osrmStopwatch.elapsed,
+        dijkstraTime: dijkstraTime,
+        cctvDocs: cctvDocs,
+        hazardNodes: hazardNodes,
+        dangerNodes: dangerNodes,
+        routes: routes,
+        vehicleType: vehicleType,
+        routeFound: false,
+        adj: null,
+        src: 0,
+        dst: 0,
+      );
+      return null;
+    }
 
     // 2b. If any candidate grazes an impassable flood point, actively request
     //     detour routes that steer OSRM around those points via offset
@@ -278,64 +348,31 @@ class RoutePlanner {
       );
       routes.addAll(detours);
     }
+    osrmStopwatch.stop();
+    osrmFetchTime = osrmStopwatch.elapsed;
 
-    // 3. Build one merged graph from all candidates.
-    final nodes = <LatLng>[];
-    final adj = <List<_Edge>>[];
-    final nodeRoute = <int>[]; // which OSRM candidate a node belongs to (-1 = endpoint)
+    // 3–5. Build one merged graph from all candidates.
+    final graphStopwatch = Stopwatch()..start();
+    final graph = _buildGraph(
+      routes: routes,
+      origin: origin,
+      destination: destination,
+      hazardNodes: hazardNodes,
+      vehicleType: vehicleType,
+    );
+    graphStopwatch.stop();
+    graphConstructionTime = graphStopwatch.elapsed;
 
-    int addNode(LatLng p, int route) {
-      nodes.add(p);
-      adj.add(<_Edge>[]);
-      nodeRoute.add(route);
-      return nodes.length - 1;
-    }
-
-    void link(int a, int b, double w, bool alert) {
-      adj[a].add(_Edge(b, w, alert));
-      adj[b].add(_Edge(a, w, alert));
-    }
-
-    final startIdx = <int>[];
-    final endIdx = <int>[];
-
-    for (var r = 0; r < routes.length; r++) {
-      final pts = routes[r].points;
-      final idxs = List<int>.generate(pts.length, (k) => addNode(pts[k], r));
-      startIdx.add(idxs.first);
-      endIdx.add(idxs.last);
-      for (var i = 0; i < idxs.length - 1; i++) {
-        final sw = _segmentWeight(
-          nodes[idxs[i]],
-          nodes[idxs[i + 1]],
-          hazardNodes,
-          vehicleType,
-        );
-        // Blocked segments simply get no edge, so Dijkstra can never use them.
-        if (sw.weight.isFinite) {
-          link(idxs[i], idxs[i + 1], sw.weight, sw.isAlert);
-        }
-      }
-    }
-
-    // 4. Cross-link nearby points from different candidates so Dijkstra can
-    //    switch roads mid-route to escape a flooded segment.
-    _addCrossLinks(nodes, nodeRoute, hazardNodes, vehicleType, link);
-
-    // 5. Add explicit origin/destination super-nodes wired to every candidate.
-    final src = addNode(origin, -1);
-    final dst = addNode(destination, -1);
-    for (final s in startIdx) {
-      final sw = _segmentWeight(origin, nodes[s], hazardNodes, vehicleType);
-      if (sw.weight.isFinite) link(src, s, sw.weight, sw.isAlert);
-    }
-    for (final e in endIdx) {
-      final sw = _segmentWeight(nodes[e], destination, hazardNodes, vehicleType);
-      if (sw.weight.isFinite) link(dst, e, sw.weight, sw.isAlert);
-    }
+    final nodes = graph.nodes;
+    final adj = graph.adj;
+    final src = graph.src;
+    final dst = graph.dst;
 
     // 6. Run Dijkstra to find the safest guaranteed path.
+    final dijkstraStopwatch = Stopwatch()..start();
     final dijkstra = _dijkstra(adj, src, dst);
+    dijkstraStopwatch.stop();
+    dijkstraTime = dijkstraStopwatch.elapsed;
 
     final originNode = RouteNode(
       id: 'origin',
@@ -367,6 +404,33 @@ class RoutePlanner {
           : 8.33;
       final fbKm = fbDistM / 1000.0;
       final fbMin = (fbSpeed > 0 ? fbDistM / fbSpeed : 0.0) / 60.0;
+      pathGenStopwatch.stop();
+
+      _emitRoutingLog(
+        origin: origin,
+        destination: destination,
+        context: context,
+        pathGenerationLatency: pathGenStopwatch.elapsed,
+        graphConstructionTime: graphConstructionTime,
+        dbFetchTime: dbFetchTime,
+        osrmFetchTime: osrmFetchTime,
+        dijkstraTime: dijkstraTime,
+        cctvDocs: cctvDocs,
+        hazardNodes: hazardNodes,
+        dangerNodes: dangerNodes,
+        routes: routes,
+        vehicleType: vehicleType,
+        routeFound: true,
+        adj: adj,
+        src: src,
+        dst: dst,
+        dijkstraPath: const [],
+        routePoints: fallback,
+        distanceKm: fbKm,
+        durationMinutes: fbMin,
+        chosenHasAlert: true,
+      );
+
       return RoutePlanResult(
         path: [originNode, destinationNode],
         distanceKm: fbKm,
@@ -398,6 +462,33 @@ class RoutePlanner {
         ? 'Route passes through a flood alert zone. Proceed with caution for your vehicle type.'
         : null;
 
+    pathGenStopwatch.stop();
+
+    _emitRoutingLog(
+      origin: origin,
+      destination: destination,
+      context: context,
+      pathGenerationLatency: pathGenStopwatch.elapsed,
+      graphConstructionTime: graphConstructionTime,
+      dbFetchTime: dbFetchTime,
+      osrmFetchTime: osrmFetchTime,
+      dijkstraTime: dijkstraTime,
+      cctvDocs: cctvDocs,
+      hazardNodes: hazardNodes,
+      dangerNodes: dangerNodes,
+      routes: routes,
+      vehicleType: vehicleType,
+      routeFound: true,
+      adj: adj,
+      src: src,
+      dst: dst,
+      dijkstraPath: dijkstra.path,
+      routePoints: routePoints,
+      distanceKm: distanceKm,
+      durationMinutes: durationMinutes,
+      chosenHasAlert: dijkstra.hasAlert,
+    );
+
     return RoutePlanResult(
       path: [originNode, destinationNode],
       distanceKm: distanceKm,
@@ -414,6 +505,289 @@ class RoutePlanner {
   /// Links nearby points that belong to *different* OSRM candidates, forming
   /// crossover junctions in the merged graph. Uses a coarse spatial hash grid
   /// to stay close to O(n).
+  static _GraphBuildResult _buildGraph({
+    required List<_OsrmRoute> routes,
+    required LatLng origin,
+    required LatLng destination,
+    required List<RouteNode> hazardNodes,
+    required VehicleType vehicleType,
+  }) {
+    final nodes = <LatLng>[];
+    final adj = <List<_Edge>>[];
+    final nodeRoute = <int>[];
+
+    int addNode(LatLng p, int route) {
+      nodes.add(p);
+      adj.add(<_Edge>[]);
+      nodeRoute.add(route);
+      return nodes.length - 1;
+    }
+
+    void link(int a, int b, double w, bool alert) {
+      adj[a].add(_Edge(b, w, alert));
+      adj[b].add(_Edge(a, w, alert));
+    }
+
+    final startIdx = <int>[];
+    final endIdx = <int>[];
+
+    for (var r = 0; r < routes.length; r++) {
+      final pts = routes[r].points;
+      final idxs = List<int>.generate(pts.length, (k) => addNode(pts[k], r));
+      startIdx.add(idxs.first);
+      endIdx.add(idxs.last);
+      for (var i = 0; i < idxs.length - 1; i++) {
+        final sw = _segmentWeight(
+          nodes[idxs[i]],
+          nodes[idxs[i + 1]],
+          hazardNodes,
+          vehicleType,
+        );
+        if (sw.weight.isFinite) {
+          link(idxs[i], idxs[i + 1], sw.weight, sw.isAlert);
+        }
+      }
+    }
+
+    _addCrossLinks(nodes, nodeRoute, hazardNodes, vehicleType, link);
+
+    final src = addNode(origin, -1);
+    final dst = addNode(destination, -1);
+    for (final s in startIdx) {
+      final sw = _segmentWeight(origin, nodes[s], hazardNodes, vehicleType);
+      if (sw.weight.isFinite) link(src, s, sw.weight, sw.isAlert);
+    }
+    for (final e in endIdx) {
+      final sw = _segmentWeight(nodes[e], destination, hazardNodes, vehicleType);
+      if (sw.weight.isFinite) link(dst, e, sw.weight, sw.isAlert);
+    }
+
+    return _GraphBuildResult(nodes: nodes, adj: adj, src: src, dst: dst);
+  }
+
+  static void _emitRoutingLog({
+    required LatLng origin,
+    required LatLng destination,
+    required RouteRequestContext? context,
+    required Duration pathGenerationLatency,
+    required Duration graphConstructionTime,
+    required Duration dbFetchTime,
+    required Duration osrmFetchTime,
+    required Duration dijkstraTime,
+    required List<Map<String, dynamic>> cctvDocs,
+    required List<RouteNode> hazardNodes,
+    required List<RouteNode> dangerNodes,
+    required List<_OsrmRoute> routes,
+    required VehicleType vehicleType,
+    required bool routeFound,
+    List<List<_Edge>>? adj,
+    int src = 0,
+    int dst = 0,
+    List<int> dijkstraPath = const [],
+    List<LatLng> routePoints = const [],
+    double distanceKm = 0,
+    double durationMinutes = 0,
+    bool chosenHasAlert = false,
+  }) {
+    final dangerFree = routePoints.length >= 2 &&
+        !_routeTouchesDanger(routePoints, dangerNodes);
+    final alertFreeExists =
+        adj != null && _alertFreePathExists(adj, src, dst);
+    final hasAlertAlternatives =
+        adj != null && _graphHasAlertEdges(adj);
+    final alertApplicable = alertFreeExists && hasAlertAlternatives;
+    final normalChosen = !chosenHasAlert;
+
+    final illegalDetours = adj != null && dijkstraPath.length >= 2
+        ? _countIllegalDetours(adj, dijkstraPath)
+        : (routePoints.length >= 2 ? routePoints.length - 1 : 0);
+    final allLegal = illegalDetours == 0;
+
+    final overheadMs = _measureMultiFeedOverhead(
+      routes: routes,
+      hazardNodes: hazardNodes,
+      vehicleType: vehicleType,
+      feedCount: cctvDocs.length,
+    );
+
+    Duration? rerouteLatency;
+    bool? rerouteAccurate;
+    if (context?.isReroute == true && context?.floodChangeDetectedAt != null) {
+      rerouteLatency =
+          DateTime.now().difference(context!.floodChangeDetectedAt!);
+      if (context.previousCctvDocs != null && routePoints.length >= 2) {
+        rerouteAccurate = _checkRerouteAccuracy(
+          previousDocs: context.previousCctvDocs!,
+          currentDocs: cctvDocs,
+          routePoints: routePoints,
+          vehicleType: vehicleType,
+        );
+      }
+    }
+
+    RoutingTestLogger.logRoutingTest(
+      RoutingTestSnapshot(
+        origin: origin,
+        destination: destination,
+        graphConstructionTime: graphConstructionTime,
+        pathGenerationLatency: pathGenerationLatency,
+        dbFetchTime: dbFetchTime,
+        osrmFetchTime: osrmFetchTime,
+        dijkstraTime: dijkstraTime,
+        dangerFreeRoute: dangerFree,
+        alertPreferenceApplicable: alertApplicable,
+        normalChosenWhenBothExist: normalChosen,
+        illegalDetours: illegalDetours,
+        allSegmentsLegal: allLegal,
+        isReroute: context?.isReroute ?? false,
+        rerouteTriggerLatency: rerouteLatency,
+        rerouteAccurate: rerouteAccurate,
+        multiFeedOverheadMsPerFeed: overheadMs,
+        activeFeedCount: cctvDocs.length,
+        nodeSequence: dijkstraPath,
+        distanceKm: distanceKm,
+        etaText: RoutePlanResult.formatEta(durationMinutes),
+        routeFound: routeFound,
+      ),
+    );
+  }
+
+  /// True when any route segment passes within the danger detection radius.
+  static bool _routeTouchesDanger(List<LatLng> routePoints, List<RouteNode> dangerNodes) {
+    for (var i = 0; i < routePoints.length - 1; i++) {
+      final a = routePoints[i];
+      final b = routePoints[i + 1];
+      final mid = LatLng(
+        (a.latitude + b.latitude) / 2,
+        (a.longitude + b.longitude) / 2,
+      );
+      for (final d in dangerNodes) {
+        final dist = [
+          _haversine(a, d.location),
+          _haversine(b, d.location),
+          _haversine(mid, d.location),
+        ].reduce(min);
+        if (dist <= _detectRadiusM) return true;
+      }
+    }
+    return false;
+  }
+
+  /// Counts consecutive path hops with no matching edge in the adjacency graph.
+  static int _countIllegalDetours(List<List<_Edge>> adj, List<int> path) {
+    var illegal = 0;
+    for (var i = 0; i < path.length - 1; i++) {
+      final u = path[i];
+      final v = path[i + 1];
+      final connected = adj[u].any((e) => e.to == v);
+      if (!connected) illegal++;
+    }
+    return illegal;
+  }
+
+  /// Returns true when a path exists that avoids all ALERT-classified edges.
+  static bool _alertFreePathExists(List<List<_Edge>> adj, int src, int dst) {
+    final n = adj.length;
+    final dist = List<double>.filled(n, double.infinity);
+    final prev = List<int>.filled(n, -1);
+    dist[src] = 0;
+
+    final heap = _MinHeap();
+    heap.add(0.0, src);
+
+    while (!heap.isEmpty) {
+      final (cost, u) = heap.removeMin();
+      if (cost > dist[u]) continue;
+      if (u == dst) break;
+
+      for (final e in adj[u]) {
+        if (e.isAlert || !e.weight.isFinite) continue;
+        final newCost = dist[u] + e.weight;
+        if (newCost < dist[e.to]) {
+          dist[e.to] = newCost;
+          prev[e.to] = u;
+          heap.add(newCost, e.to);
+        }
+      }
+    }
+
+    return dist[dst] < double.infinity;
+  }
+
+  /// Measures per-feed hazard-check overhead vs. idle (no hazards) baseline.
+  static double _measureMultiFeedOverhead({
+    required List<_OsrmRoute> routes,
+    required List<RouteNode> hazardNodes,
+    required VehicleType vehicleType,
+    required int feedCount,
+  }) {
+    if (routes.isEmpty) return 0;
+
+    final segments = <(LatLng, LatLng)>[];
+    for (final route in routes) {
+      for (var i = 0; i < route.points.length - 1; i++) {
+        segments.add((route.points[i], route.points[i + 1]));
+      }
+    }
+    if (segments.isEmpty) return 0;
+
+    final idleSw = Stopwatch()..start();
+    for (final (a, b) in segments) {
+      _haversine(a, b);
+    }
+    idleSw.stop();
+
+    final fullSw = Stopwatch()..start();
+    for (final (a, b) in segments) {
+      _segmentWeight(a, b, hazardNodes, vehicleType);
+    }
+    fullSw.stop();
+
+    final deltaMs =
+        (fullSw.elapsedMicroseconds - idleSw.elapsedMicroseconds) / 1000.0;
+    final divisor = feedCount >= 3 ? 3 : max(feedCount, 1);
+    return deltaMs / divisor;
+  }
+
+  /// True when the graph contains at least one ALERT-weighted edge.
+  static bool _graphHasAlertEdges(List<List<_Edge>> adj) {
+    for (final edges in adj) {
+      for (final e in edges) {
+        if (e.isAlert && e.weight.isFinite) return true;
+      }
+    }
+    return false;
+  }
+
+  /// Confirms the rerouted path avoids segments that just became impassable.
+  static bool _checkRerouteAccuracy({
+    required List<Map<String, dynamic>> previousDocs,
+    required List<Map<String, dynamic>> currentDocs,
+    required List<LatLng> routePoints,
+    required VehicleType vehicleType,
+  }) {
+    final previous = _seedNodes(previousDocs);
+    final current = _seedNodes(currentDocs);
+
+    final newlyImpassable = <RouteNode>[];
+    for (final cur in current) {
+      RouteNode? prev;
+      for (final p in previous) {
+        if (_haversine(p.location, cur.location) < 1.0) {
+          prev = p;
+          break;
+        }
+      }
+      final wasPassable = prev == null || prev.isPassableFor(vehicleType);
+      if (wasPassable && !cur.isPassableFor(vehicleType)) {
+        newlyImpassable.add(cur);
+      }
+    }
+
+    if (newlyImpassable.isEmpty) return true;
+    return !_routeTouchesDanger(routePoints, newlyImpassable);
+  }
+
   static void _addCrossLinks(
     List<LatLng> nodes,
     List<int> nodeRoute,
