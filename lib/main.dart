@@ -14,7 +14,7 @@ class SubayApp extends StatelessWidget {
   
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'SUBAY',
+      title: 'FloodSight',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,

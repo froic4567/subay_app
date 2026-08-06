@@ -36,6 +36,7 @@ dependencies:
   geolocator: ^13.0.2    # GPS location
   http: ^1.5.2            # route requests to the map road network
   google_sign_in: ^6.2.1 # Google authentication
+  flutter_svg: ^2.0.9    # SVG support for logos/icons
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
@@ -64,9 +65,8 @@ flutter:
   uses-material-design: true
 
   # To add assets to your application, add an assets section, like this:
-  # assets:
-  #   - images/a_dot_burr.jpeg
-  #   - images/a_dot_ham.jpeg
+  assets:
+    - assets/images/
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

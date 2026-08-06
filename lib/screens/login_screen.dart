@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import '../services/auth_service.dart';
 import '../theme/app_colors.dart';
 import 'home_screen.dart';
@@ -65,26 +66,10 @@ class _LoginScreenState extends State<LoginScreen> {
 
               // ── Logo ──────────────────────────────────────
               Center(
-                child: Container(
-                  width: 110,
-                  height: 110,
-                  decoration: BoxDecoration(
-                    color: AppColors.backgroundSecondary,
-                    borderRadius: BorderRadius.circular(24),
-                    border: Border.all(color: AppColors.border),
-                  ),
-                  child: const Center(
-                    child: Text(
-                      'LOGO\nHERE',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: AppColors.textMuted,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
-                        height: 1.5,
-                      ),
-                    ),
-                  ),
+                child: SvgPicture.asset(
+                  'assets/images/logo.svg',
+                  width: 120,
+                  height: 120,
                 ),
               ),
 
@@ -92,7 +77,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
               // ── App name ──────────────────────────────────
               const Text(
-                'SUBAY',
+                'FloodSight',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontSize: 30,
