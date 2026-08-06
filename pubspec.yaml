@@ -35,7 +35,11 @@ dependencies:
   latlong2: ^0.9.1        # LatLng type
   geolocator: ^13.0.2    # GPS location
   http: ^1.5.2            # route requests to the map road network
-  google_sign_in: ^6.2.1 # Google authentication
+  google_sign_in: ^6.2.1  # Google authentication credential provider
+  firebase_core: ^4.13.0
+  firebase_auth: ^6.5.7
+  cloud_firestore: ^6.8.0
+  flutter_dotenv: ^5.0.2
   flutter_svg: ^2.0.9    # SVG support for logos/icons
 
   # The following adds the Cupertino Icons font to your application.
@@ -67,6 +71,7 @@ flutter:
   # To add assets to your application, add an assets section, like this:
   assets:
     - assets/images/
+    - .env
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

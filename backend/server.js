@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
 const { MongoClient } = require('mongodb');
@@ -6,7 +8,10 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ── MongoDB connection ──────────────────────────────────────────────────────
-const uri = 'mongodb+srv://langgamencarlsyker_db_user:jXWU3wKwkMgHxqpH@cluster0.0fpztcp.mongodb.net/';
+const uri = process.env.MONGODB_URI || '';
+if (!uri) {
+  console.error('❌ MONGODB_URI is not defined. Set it in backend/.env or the environment.');
+}
 
 // Connection options with generous timeouts to handle slow networks
 const client = new MongoClient(uri, {
@@ -18,8 +23,8 @@ const client = new MongoClient(uri, {
 });
 
 // Explicitly target your database and collection names
-const DB_NAME = 'CCTVs';
-const COLLECTION_NAME = 'cctv data';
+const DB_NAME = process.env.MONGODB_DB || 'CCTVs';
+const COLLECTION_NAME = process.env.MONGODB_COLLECTION || 'cctv data';
 
 let dbCollection = null;
 let isConnecting = false;

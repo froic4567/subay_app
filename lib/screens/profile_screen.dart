@@ -1,12 +1,10 @@
 import 'package:flutter/material.dart';
 import '../services/auth_service.dart';
 import '../theme/app_colors.dart';
-import 'login_screen.dart';
 
 class ProfileScreen extends StatelessWidget {
   const ProfileScreen({super.key});
 
-  // ── Logout dialog ─────────────────────────────────────────────────────────
   void _showLogoutDialog(BuildContext context) {
     showDialog(
       context: context,
@@ -36,13 +34,11 @@ class ProfileScreen extends StatelessWidget {
           TextButton(
             onPressed: () async {
               Navigator.pop(ctx);
-              // Sign out from Google / clear session
               await AuthService.instance.signOut();
               if (!context.mounted) return;
-              // Navigate back to login and remove all previous routes
-              Navigator.pushAndRemoveUntil(
+              Navigator.pushNamedAndRemoveUntil(
                 context,
-                MaterialPageRoute(builder: (_) => const LoginScreen()),
+                '/login',
                 (_) => false,
               );
             },
@@ -62,10 +58,9 @@ class ProfileScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final user = AuthService.instance.currentUser;
-    final displayName = user?.displayName ?? 'SUBAY User';
+    final displayName = user?.displayName ?? 'FloodSight User';
     final email = user?.email ?? 'Not signed in';
     final photoUrl = user?.photoUrl;
-    // Initial for the avatar fallback
     final initial = displayName.isNotEmpty ? displayName[0].toUpperCase() : 'U';
 
     return Scaffold(
@@ -84,8 +79,6 @@ class ProfileScreen extends StatelessWidget {
         child: Column(
           children: [
             const SizedBox(height: 24),
-
-            // ── Avatar ───────────────────────────────────────────────────────
             CircleAvatar(
               radius: 38,
               backgroundColor: AppColors.primary,
@@ -102,8 +95,6 @@ class ProfileScreen extends StatelessWidget {
                   : null,
             ),
             const SizedBox(height: 12),
-
-            // ── Display Name ──────────────────────────────────────────────────
             Text(
               displayName,
               style: const TextStyle(
@@ -113,8 +104,6 @@ class ProfileScreen extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 28),
-
-            // ── Info fields ──────────────────────────────────────────────────
             _ProfileField(
               label: 'Email',
               value: email,
@@ -126,10 +115,7 @@ class ProfileScreen extends StatelessWidget {
               value: displayName,
               onTap: () {},
             ),
-
             const Spacer(),
-
-            // ── Logout button ────────────────────────────────────────────────
             SizedBox(
               width: double.infinity,
               child: OutlinedButton.icon(
@@ -155,8 +141,6 @@ class ProfileScreen extends StatelessWidget {
     );
   }
 }
-
-// ── Profile Field ─────────────────────────────────────────────────────────────
 
 class _ProfileField extends StatelessWidget {
   final String label;

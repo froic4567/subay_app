@@ -1,3 +1,6 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:google_sign_in/google_sign_in.dart';
 
 /// Holds the signed-in user's details for display across the app.
@@ -15,10 +18,7 @@ class AppUser {
   });
 }
 
-/// Singleton service that manages Google Sign-In.
-///
-/// The user is verified via Google but NOT stored in any database.
-/// Their details are kept in memory only for display in the Profile screen.
+/// Singleton service that manages Firebase-backed Google authentication.
 class AuthService {
   AuthService._internal();
   static final AuthService instance = AuthService._internal();
@@ -27,59 +27,110 @@ class AuthService {
     scopes: ['email', 'profile'],
   );
 
-  AppUser? _currentUser;
-  AppUser? get currentUser => _currentUser;
+  AppUser? get currentUser => _userFromFirebase(FirebaseAuth.instance.currentUser);
 
-  /// Attempts Google Sign-In. Returns the [AppUser] on success, null on failure.
+  Stream<User?> authStateChanges() => FirebaseAuth.instance.authStateChanges();
+
+  AppUser? _userFromFirebase(User? user) {
+    if (user == null) return null;
+
+    return AppUser(
+      id: user.uid,
+      displayName: user.displayName ?? 'FloodSight User',
+      email: user.email ?? '',
+      photoUrl: user.photoURL,
+    );
+  }
+
+  /// Attempts Google Sign-In and returns the authenticated [AppUser].
+  /// Returns null if the user cancels or authentication fails.
   Future<AppUser?> signInWithGoogle() async {
     print('🔐 [Auth] Initiating Google Sign-In...');
     try {
-      final account = await _googleSignIn.signIn();
-      if (account == null) {
-        print('⚠️ [Auth] User cancelled sign-in');
-        return null; // user cancelled
+      final UserCredential userCredential;
+
+      if (kIsWeb) {
+        // On web, Firebase Auth's own popup flow is project-scoped and
+        // doesn't need the google_sign_in package's separate OAuth client ID.
+        final provider = GoogleAuthProvider()
+          ..addScope('email')
+          ..addScope('profile');
+        userCredential = await FirebaseAuth.instance.signInWithPopup(provider);
+      } else {
+        final googleUser = await _googleSignIn.signIn();
+        if (googleUser == null) {
+          print('⚠️ [Auth] User cancelled sign-in');
+          return null;
+        }
+
+        final googleAuth = await googleUser.authentication;
+        if (googleAuth.idToken == null || googleAuth.accessToken == null) {
+          print('❌ [Auth] Google authentication tokens are unavailable');
+          return null;
+        }
+
+        final credential = GoogleAuthProvider.credential(
+          idToken: googleAuth.idToken,
+          accessToken: googleAuth.accessToken,
+        );
+
+        userCredential =
+            await FirebaseAuth.instance.signInWithCredential(credential);
+      }
+
+      final firebaseUser = userCredential.user;
+      if (firebaseUser == null) {
+        print('❌ [Auth] Firebase returned no authenticated user');
+        return null;
       }
 
       print('✅ [Auth] Sign-in successful!');
-      print('   User: ${account.displayName}');
-      print('   Email: ${account.email}');
-      print('   ID: ${account.id}');
+      print('   UID: ${firebaseUser.uid}');
+      print('   Email: ${firebaseUser.email ?? 'unknown'}');
+      print('   Name: ${firebaseUser.displayName ?? 'unknown'}');
 
-      _currentUser = AppUser(
-        id: account.id,
-        displayName: account.displayName ?? 'SUBAY User',
-        email: account.email,
-        photoUrl: account.photoUrl,
-      );
-      return _currentUser;
-    } catch (e) {
-      print('❌ [Auth] Sign-in failed: $e');
-      print('   Make sure Google Cloud OAuth is configured correctly.');
-      print('   Check web/index.html has the correct client ID.');
+      await _upsertUserProfile(firebaseUser);
+      return currentUser;
+    } catch (error) {
+      print('❌ [Auth] Sign-in failed: $error');
       return null;
     }
   }
 
-  /// Signs out the current user and clears the session.
+  Future<void> _upsertUserProfile(User user) async {
+    try {
+      final doc = FirebaseFirestore.instance.collection('users').doc(user.uid);
+      await doc.set(
+        {
+          'displayName': user.displayName ?? 'FloodSight User',
+          'email': user.email ?? '',
+          'photoUrl': user.photoURL,
+          'lastLogin': DateTime.now().toUtc().toIso8601String(),
+        },
+        SetOptions(merge: true),
+      );
+      print('✅ [Auth] User profile stored in Firestore for UID ${user.uid}');
+    } catch (error) {
+      print('⚠️ [Auth] Failed to update Firestore user profile: $error');
+    }
+  }
+
+  /// Signs out the current user from Firebase Auth and Google Sign-In.
   Future<void> signOut() async {
     try {
-      await _googleSignIn.signOut();
-    } catch (_) {
-      // ignore errors on sign-out
+      await FirebaseAuth.instance.signOut();
+      print('🔐 [Auth] Firebase sign-out successful');
+    } catch (error) {
+      print('⚠️ [Auth] Firebase sign-out failed: $error');
     }
-    _currentUser = null;
+
+    try {
+      await _googleSignIn.signOut();
+      print('🔐 [Auth] Google sign-out successful');
+    } catch (error) {
+      print('⚠️ [Auth] Google sign-out failed: $error');
+    }
   }
 
-  /// Returns true if a user is currently signed in.
-  bool get isSignedIn => _currentUser != null;
-
-  /// Creates a demo user for development when Google Sign-In is not configured.
-  void setDemoUser() {
-    _currentUser = const AppUser(
-      id: 'demo-user',
-      displayName: 'Demo User',
-      email: 'demo@subay.app',
-      photoUrl: null,
-    );
-  }
+  bool get isSignedIn => FirebaseAuth.instance.currentUser != null;
 }

@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import '../services/auth_service.dart';
 import '../theme/app_colors.dart';
-import 'home_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -23,29 +22,15 @@ class _LoginScreenState extends State<LoginScreen> {
     if (!mounted) return;
 
     if (user != null) {
-      // Success — navigate to home
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const HomeScreen()),
-      );
+      Navigator.pushReplacementNamed(context, '/home');
     } else {
-      // Google Sign-In failed or not configured
-      // Show error message
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            'Google Sign-In is not configured. Continuing in demo mode.',
+            'Google Sign-In failed or was cancelled. Please try again.',
           ),
           duration: Duration(seconds: 3),
         ),
-      );
-
-      // Fall back to demo mode with a mock user
-      AuthService.instance.setDemoUser();
-
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const HomeScreen()),
       );
     }
 
