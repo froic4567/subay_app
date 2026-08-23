@@ -2,6 +2,9 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import '../services/cctv_service.dart';
 import '../theme/app_colors.dart';
+import '../theme/app_radius.dart';
+import '../theme/app_shadows.dart';
+import '../widgets/status_badge.dart';
 
 // ── Data model ────────────────────────────────────────────────────────────────
 
@@ -31,23 +34,6 @@ class NotificationItem {
     }
   }
 
-  /// Status badge background
-  Color get statusBadgeBg {
-    switch (status) {
-      case 'DANGER': return const Color(0xFFFFCDD2);
-      case 'ALERT':  return const Color(0xFFFFE0B2);
-      default:       return const Color(0xFFC8E6C9);
-    }
-  }
-
-  /// Status badge text color
-  Color get statusBadgeText {
-    switch (status) {
-      case 'DANGER': return const Color(0xFFC62828);
-      case 'ALERT':  return const Color(0xFFE65100);
-      default:       return const Color(0xFF2E7D32);
-    }
-  }
 }
 
 // ── Screen ────────────────────────────────────────────────────────────────────
@@ -274,7 +260,7 @@ class _FilterTab extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 7),
         decoration: BoxDecoration(
           color: selected ? AppColors.primary : Colors.white,
-          borderRadius: BorderRadius.circular(20),
+          borderRadius: BorderRadius.circular(AppRadius.full),
           border: Border.all(
             color: selected ? AppColors.primary : const Color(0xFFE0E0E0),
             width: 1.2,
@@ -304,15 +290,9 @@ class _NotificationCard extends StatelessWidget {
     return Container(
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(AppRadius.xl),
         border: Border.all(color: const Color(0xFFE8E8E8), width: 1),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.04),
-            blurRadius: 6,
-            offset: const Offset(0, 2),
-          ),
-        ],
+        boxShadow: AppShadows.sm,
       ),
       clipBehavior: Clip.antiAlias,
       child: Row(
@@ -335,26 +315,13 @@ class _NotificationCard extends StatelessWidget {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Row(
-                        children: [
-                          Container(
-                            width: 8,
-                            height: 8,
-                            decoration: BoxDecoration(
-                              color: item.statusColor,
-                              shape: BoxShape.circle,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            item.title,
-                            style: const TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w700,
-                              color: Color(0xFF1A1A1A),
-                            ),
-                          ),
-                        ],
+                      Text(
+                        item.title,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                          color: Color(0xFF1A1A1A),
+                        ),
                       ),
                       Text(
                         item.timeAgo,
@@ -391,28 +358,13 @@ class _NotificationCard extends StatelessWidget {
                     spacing: 6,
                     runSpacing: 6,
                     children: [
-                      // Status badge
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                        decoration: BoxDecoration(
-                          color: item.statusBadgeBg,
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Text(
-                          'Status: ${item.status}',
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            color: item.statusBadgeText,
-                          ),
-                        ),
-                      ),
+                      StatusBadge(status: item.status, pulse: true),
                       // Flood height badge
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                         decoration: BoxDecoration(
                           color: const Color(0xFFE3F2FD),
-                          borderRadius: BorderRadius.circular(6),
+                          borderRadius: BorderRadius.circular(AppRadius.sm),
                         ),
                         child: Text(
                           'Flood Height: ${item.floodHeight.toStringAsFixed(2)} m',
@@ -420,6 +372,7 @@ class _NotificationCard extends StatelessWidget {
                             fontSize: 11,
                             fontWeight: FontWeight.w600,
                             color: Color(0xFF1565C0),
+                            fontFeatures: [FontFeature.tabularFigures()],
                           ),
                         ),
                       ),

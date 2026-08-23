@@ -45,12 +45,15 @@ This app has no admin role, user-management screen, or camera-configuration scre
 
 - The map must render OpenStreetMap tiles (via `flutter_map`) and support place search.
 - Each monitored flood point must be shown as a color-coded marker for its status: DANGER, ALERT, or NORMAL/SAFE.
-- The map must support locating the user's current position via `geolocator`.
+- In addition to the marker, the map must display the real road segment each camera monitors, colored to match its status. `lib/services/road_segment_service.dart` resolves this via the free Overpass API (OpenStreetMap): it finds the vehicle-usable road nearest the camera's stored coordinate and clips it to ~200 m each direction along that road's own geometry (`RoadSegmentService.clipDistanceM`). Results are cached in-memory per camera coordinate for the app session. If no road is found within the snap radius, no segment is drawn for that camera — the point marker still shows (no fabricated segment).
+- The user's position must be tracked continuously (not just on demand) via `LocationService`/`geolocator`, so the "my location" marker stays live regardless of whether the user is navigating or on another tab; the "Current Location" button remains available as a manual recenter action.
 
 ### 4.4 Flood-Aware Routing
 
 - The user must be able to choose a vehicle type — bicycle, motorcycle, sedan/car, SUV/van, or truck/bus — each with a fixed maximum safe water depth (0.15 m, 0.25 m, 0.40 m, 0.65 m, and 0.90 m respectively).
 - Given an origin and destination, the app must compute a route using Dijkstra's algorithm over a graph built from multiple OSRM candidate routes plus generated detour waypoints around flood points, with live flood nodes from the database merged in as graph constraints.
+- A flood hazard's effect on the graph is not limited to the single OSRM vertex nearest the camera's coordinate: candidate polylines are densified to ~20 m spacing and a hazard's block/penalty propagates up to ~200 m of arc length in both directions from its nearest point on the road (`RoutePlanner._computeVertexHazards`), so long, sparsely-vertexed straight roads are treated as affected along their whole flooded stretch rather than only at the exact camera point.
+- Merging different OSRM candidate routes into one graph only cross-links two candidates' points when at least one is within a hazard's affected zone (`RoutePlanner._addCrossLinks`); this keeps a candidate a single coherent road elsewhere, avoiding unnecessary turns/detours that a distance-only cross-link (regardless of hazard proximity) would otherwise allow.
 - DANGER points must always be treated as impassable; ALERT points must be passable only when the selected vehicle's water-level tolerance covers the reported depth, and are penalized in path weight even when passable.
 - If no safe path exists, the app must fall back to the primary OSRM route and warn the user rather than failing silently.
 - Routing must record performance and correctness metrics (path latency, database/OSRM fetch time, Dijkstra compute time, reroute behavior) for evaluation purposes.
@@ -106,6 +109,7 @@ The app is fully database-driven for flood data: if the backend or MongoDB is un
 - `flutter_lints` (`^6.0.0`, dev dependency) for static analysis
 - OSRM (`router.project-osrm.org`) for base route candidates
 - Nominatim (OpenStreetMap) for geocoding and place search
+- Overpass API (`overpass-api.de`, OpenStreetMap) for resolving the real road geometry a camera monitors, for Map tab road-segment visualization
 - Backend: Node.js + Express (`backend/server.js`) with the `mongodb` driver, connecting to a MongoDB Atlas cluster (database `CCTVs`, collection `cctv data`)
 
 ## 8. Constraints and Implementation Guidelines
@@ -114,7 +118,7 @@ The app is fully database-driven for flood data: if the backend or MongoDB is un
 - No state-management package (Provider, Riverpod, Bloc, etc.) is used — shared state stays in `StatefulWidget`/`setState` and singleton service classes under `lib/services/`.
 - The backend must remain database-driven: it must never substitute hardcoded/sample flood data when MongoDB is unreachable or empty.
 - Keep the app usable when the backend is temporarily unreachable — CCTV/alert fetches must degrade to an empty list rather than crashing the UI.
-- Preserve the existing platform-aware backend base URL selection (`localhost:3000` for web, `10.0.2.2:3000` for the Android emulator) when touching `CctvService`.
+- Preserve the existing platform-aware backend base URL selection (`localhost:3000` for web, `10.0.2.2:3000` for the Android emulator) when touching `CctvService`. An optional `BACKEND_URL` value in `.env` overrides this for physical-device testing over LAN.
 
 ## 9. Acceptance Criteria
 

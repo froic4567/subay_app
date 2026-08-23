@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 
 class AppColors {
-  static const Color primary     = Color(0xFF00796B);
-  static const Color primaryDark = Color(0xFF004D40);
+  // FloodSight brand blue — matches the web dashboard's chrome primary
+  // (--color-primary: oklch(0.58 0.17 245), ~#2C6FD1).
+  static const Color primary      = Color(0xFF2C6FD1);
+  static const Color primaryDark  = Color(0xFF1E4E9E); // pressed/hover state
+  static const Color primaryLight = Color(0xFFE4EEF9); // pale blue accent — chip/badge backgrounds
 
   static const Color danger      = Color(0xFFEF4444);
   static const Color dangerLight = Color(0xFFFCEBEB);
@@ -33,4 +36,7 @@ class AppColors {
   static const Color routeBlue       = Color(0xFF2D7FF9); // main route line
   static const Color routeBlueDark   = Color(0xFF1B5EAB); // outline / shadow
   static const Color routeStart       = Color(0xFF2D7FF9); // origin marker
+
+  // Camera-covered road segment outline (Map tab)
+  static const Color segmentOutline = Color(0xFF2A2A2A);
 }

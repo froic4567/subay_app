@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
 
 /// Fetches CCTV flood monitoring data from the backend API (which connects to MongoDB).
@@ -10,12 +11,17 @@ import 'package:http/http.dart' as http;
 /// ever injected, so routing only ever avoids real, database-marked flood points.
 ///
 /// URL selection:
+/// - `BACKEND_URL` in `.env`, if set — used as-is (needed for a physical device,
+///   since `localhost`/`10.0.2.2` are not reachable from real hardware).
 /// - Web (Chrome): http://localhost:3000
 /// - Android emulator: http://10.0.2.2:3000
-/// - Physical device: http://your-computer-LAN-IP:3000
 class CctvService {
-  // Auto-detect the correct base URL based on platform
+  // Auto-detect the correct base URL based on platform, unless overridden.
   static String get _baseUrl {
+    final override = dotenv.env['BACKEND_URL'];
+    if (override != null && override.trim().isNotEmpty) {
+      return override.trim();
+    }
     if (kIsWeb) {
       // Running on web browser — use localhost directly
       return 'http://localhost:3000';

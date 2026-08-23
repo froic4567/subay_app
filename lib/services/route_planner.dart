@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 import 'cctv_service.dart';
+import 'geo_utils.dart';
 import 'routing_test_logger.dart';
 
 /// Optional context for route requests triggered by flood-status changes.
@@ -276,6 +277,22 @@ class RoutePlanner {
   /// Dijkstra prefers a fully-normal alternative when one exists.
   static const double _alertPenalty = 6.0;
 
+  /// Arc-length distance (meters) a hazard's block/penalty propagates along
+  /// a candidate route's polyline in each direction from its nearest point
+  /// on that road, so a flood affects the whole nearby stretch instead of
+  /// only the one OSRM edge that happens to graze the camera's exact
+  /// coordinate. Mirrors the Map tab's camera-coverage clip distance
+  /// (RoadSegmentService.clipDistanceM) so both tabs treat "affected road"
+  /// consistently.
+  static const double _hazardPropagationM = 200.0;
+
+  /// Target maximum edge length (meters) after densifying an OSRM polyline.
+  /// OSRM's own vertex spacing is uneven — dense on curves, sparse on long
+  /// straights — so without this, a single long straight edge could span
+  /// the entire hazard-propagation window and only ever be as accurate as
+  /// one lucky/unlucky endpoint check.
+  static const double _maxEdgeLengthM = 20.0;
+
   static Future<RoutePlanResult?> planRoute({
     required LatLng origin,
     required LatLng destination,
@@ -515,11 +532,17 @@ class RoutePlanner {
     final nodes = <LatLng>[];
     final adj = <List<_Edge>>[];
     final nodeRoute = <int>[];
+    // Precomputed hazard (if any) affecting each node, from arc-length
+    // propagation along its own candidate route. Shared with _addCrossLinks
+    // so cross-candidate edges use the same hazard model as within-candidate
+    // edges, instead of re-deriving it from a raw point-radius check.
+    final nodeHazard = <RouteNode?>[];
 
-    int addNode(LatLng p, int route) {
+    int addNode(LatLng p, int route, RouteNode? hazard) {
       nodes.add(p);
       adj.add(<_Edge>[]);
       nodeRoute.add(route);
+      nodeHazard.add(hazard);
       return nodes.length - 1;
     }
 
@@ -532,15 +555,20 @@ class RoutePlanner {
     final endIdx = <int>[];
 
     for (var r = 0; r < routes.length; r++) {
-      final pts = routes[r].points;
-      final idxs = List<int>.generate(pts.length, (k) => addNode(pts[k], r));
+      final densified = GeoUtils.densify(routes[r].points, _maxEdgeLengthM);
+      final vertexHazards = _computeVertexHazards(densified, hazardNodes);
+      final idxs = List<int>.generate(
+        densified.length,
+        (k) => addNode(densified[k], r, vertexHazards[k]),
+      );
       startIdx.add(idxs.first);
       endIdx.add(idxs.last);
       for (var i = 0; i < idxs.length - 1; i++) {
-        final sw = _segmentWeight(
+        final sw = _edgeWeightFromVertexHazards(
           nodes[idxs[i]],
           nodes[idxs[i + 1]],
-          hazardNodes,
+          vertexHazards[i],
+          vertexHazards[i + 1],
           vehicleType,
         );
         if (sw.weight.isFinite) {
@@ -549,10 +577,10 @@ class RoutePlanner {
       }
     }
 
-    _addCrossLinks(nodes, nodeRoute, hazardNodes, vehicleType, link);
+    _addCrossLinks(nodes, nodeRoute, nodeHazard, vehicleType, link);
 
-    final src = addNode(origin, -1);
-    final dst = addNode(destination, -1);
+    final src = addNode(origin, -1, null);
+    final dst = addNode(destination, -1, null);
     for (final s in startIdx) {
       final sw = _segmentWeight(origin, nodes[s], hazardNodes, vehicleType);
       if (sw.weight.isFinite) link(src, s, sw.weight, sw.isAlert);
@@ -791,7 +819,7 @@ class RoutePlanner {
   static void _addCrossLinks(
     List<LatLng> nodes,
     List<int> nodeRoute,
-    List<RouteNode> hazards,
+    List<RouteNode?> nodeHazard,
     VehicleType vehicle,
     void Function(int a, int b, double w, bool alert) link,
   ) {
@@ -818,14 +846,122 @@ class RoutePlanner {
           for (final j in bucket) {
             if (j <= i) continue; // add each pair once
             if (nodeRoute[j] == nodeRoute[i]) continue; // only across candidates
+            // Only allow a cross-candidate link when it's relevant to
+            // navigating around a hazard. Without this, any two OSRM
+            // alternatives that happen to run within _crossLinkRadiusM of
+            // each other ANYWHERE on the map get a free "teleport" edge,
+            // letting Dijkstra hop candidates for a trivial geometric
+            // shortcut that isn't a real turn lane — producing unnecessary
+            // turns/detours far from any flood. Escape/rejoin links near an
+            // actual hazard are preserved: _computeVertexHazards flags every
+            // vertex within _hazardPropagationM of a hazard on its own
+            // candidate, so at least one side of a genuine escape link is
+            // always non-null here.
+            if (nodeHazard[i] == null && nodeHazard[j] == null) continue;
             final d = _haversine(nodes[i], nodes[j]);
             if (d > _crossLinkRadiusM) continue;
-            final sw = _segmentWeight(nodes[i], nodes[j], hazards, vehicle);
+            final sw = _edgeWeightFromVertexHazards(
+              nodes[i],
+              nodes[j],
+              nodeHazard[i],
+              nodeHazard[j],
+              vehicle,
+            );
             if (sw.weight.isFinite) link(i, j, sw.weight, sw.isAlert);
           }
         }
       }
     }
+  }
+
+  /// Ranks hazard severity so the more restrictive hazard wins where two
+  /// hazards' propagation windows overlap the same vertex. DANGER always
+  /// outranks ALERT; among ALERTs, higher water level (more restrictive,
+  /// closer to blocking more vehicle types) wins.
+  static double _hazardSeverity(RouteNode hazard) {
+    if (hazard.status.toUpperCase() == 'DANGER') return double.infinity;
+    return hazard.waterLevelM;
+  }
+
+  /// For one candidate route's densified polyline, determines which hazard
+  /// (if any) affects each vertex, by finding each hazard's nearest vertex
+  /// on this polyline (gated by [_detectRadiusM], same as the original
+  /// point-radius check) and then propagating it up to
+  /// [_hazardPropagationM] meters of arc length in both directions. This is
+  /// what makes a flood affect the whole nearby road segment instead of
+  /// only the exact camera coordinate.
+  static List<RouteNode?> _computeVertexHazards(
+    List<LatLng> densified,
+    List<RouteNode> hazardNodes,
+  ) {
+    final result = List<RouteNode?>.filled(densified.length, null);
+    if (densified.isEmpty) return result;
+
+    void mark(int idx, RouteNode hazard) {
+      final existing = result[idx];
+      if (existing == null ||
+          _hazardSeverity(hazard) > _hazardSeverity(existing)) {
+        result[idx] = hazard;
+      }
+    }
+
+    for (final hazard in hazardNodes) {
+      var nearestIdx = 0;
+      var nearestDist = double.infinity;
+      for (var i = 0; i < densified.length; i++) {
+        final d = GeoUtils.haversineM(densified[i], hazard.location);
+        if (d < nearestDist) {
+          nearestDist = d;
+          nearestIdx = i;
+        }
+      }
+      if (nearestDist > _detectRadiusM) continue;
+
+      mark(nearestIdx, hazard);
+
+      var accumulated = 0.0;
+      for (var i = nearestIdx; i > 0; i--) {
+        accumulated += GeoUtils.haversineM(densified[i], densified[i - 1]);
+        if (accumulated > _hazardPropagationM) break;
+        mark(i - 1, hazard);
+      }
+
+      accumulated = 0.0;
+      for (var i = nearestIdx; i < densified.length - 1; i++) {
+        accumulated += GeoUtils.haversineM(densified[i], densified[i + 1]);
+        if (accumulated > _hazardPropagationM) break;
+        mark(i + 1, hazard);
+      }
+    }
+
+    return result;
+  }
+
+  /// Edge weight derived from precomputed per-vertex hazard assignments
+  /// (see [_computeVertexHazards]), replacing the old 3-point-sample radius
+  /// check for polyline-internal and cross-candidate edges. Same
+  /// `(weight, isAlert)` contract as [_segmentWeight].
+  static _SegWeight _edgeWeightFromVertexHazards(
+    LatLng a,
+    LatLng b,
+    RouteNode? hazardA,
+    RouteNode? hazardB,
+    VehicleType vehicle,
+  ) {
+    final base = _haversine(a, b);
+    RouteNode? worst;
+    if (hazardA != null && hazardB != null) {
+      worst = _hazardSeverity(hazardA) >= _hazardSeverity(hazardB)
+          ? hazardA
+          : hazardB;
+    } else {
+      worst = hazardA ?? hazardB;
+    }
+    if (worst == null) return _SegWeight(base, false);
+    if (!worst.isPassableFor(vehicle)) {
+      return const _SegWeight(double.infinity, false);
+    }
+    return _SegWeight(base * _alertPenalty, true);
   }
 
   /// Computes the cost of travelling between two points. Returns an infinite

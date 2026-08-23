@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../services/auth_service.dart';
 import '../theme/app_colors.dart';
+import '../theme/app_radius.dart';
 
 class ProfileScreen extends StatelessWidget {
   const ProfileScreen({super.key});
@@ -9,7 +10,7 @@ class ProfileScreen extends StatelessWidget {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
         titlePadding: const EdgeInsets.fromLTRB(20, 20, 20, 6),
         contentPadding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
         title: const Text(
@@ -129,7 +130,7 @@ class ProfileScreen extends StatelessWidget {
                   foregroundColor: AppColors.danger,
                   side: const BorderSide(color: AppColors.danger, width: 1.5),
                   shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(10)),
+                      borderRadius: BorderRadius.circular(AppRadius.md)),
                   padding: const EdgeInsets.symmetric(vertical: 13),
                 ),
               ),
@@ -161,7 +162,7 @@ class _ProfileField extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
         decoration: BoxDecoration(
           color: Colors.white,
-          borderRadius: BorderRadius.circular(10),
+          borderRadius: BorderRadius.circular(AppRadius.lg),
           border: Border.all(color: AppColors.border),
         ),
         child: Row(

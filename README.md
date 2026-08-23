@@ -133,6 +133,32 @@ flutter run -d chrome
 
 ---
 
+### 5. Physical Device Testing
+
+The app auto-detects a backend URL for web (`localhost:3000`) and the Android emulator (`10.0.2.2:3000`), but a real phone cannot reach either of those — `localhost` on a phone means the phone itself.
+
+To run on a physical device on the same Wi-Fi network as your dev machine:
+
+1. Start the backend (`cd backend && npm run dev`) — it already listens on all network interfaces, so no backend changes are needed.
+2. Find your dev machine's LAN IP:
+   ```bash
+   ipconfig
+   ```
+   Look for the `IPv4 Address` under your active Wi-Fi adapter (e.g. `192.168.1.23`).
+3. In the root `.env` file, set:
+   ```
+   BACKEND_URL=http://192.168.1.23:3000
+   ```
+4. Connect your phone via USB with debugging enabled, then run:
+   ```bash
+   flutter run
+   ```
+   and select the physical device.
+
+If the app can't reach the backend, check that Windows Firewall allows inbound connections on TCP port 3000.
+
+---
+
 ## Project Structure
 
 ```text

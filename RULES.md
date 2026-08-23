@@ -59,8 +59,10 @@ This document records the naming conventions, formatting practices, and implemen
   - `GET /api/alerts` — documents with status `alert` or `danger`, sorted newest first.
 - Keep the backend fully database-driven: on MongoDB failure or empty results, endpoints must return an empty array/list, never hardcoded sample flood data.
 - On the Flutter side, keep all backend calls behind `lib/services/cctv_service.dart`; do not call `http` directly from screens for CCTV/alert data.
-- Preserve the platform-aware base URL selection in `CctvService` (`localhost:3000` on web, `10.0.2.2:3000` on the Android emulator) when modifying networking code.
-- Validate and normalize external data (backend JSON, OSRM/Nominatim responses) at the service boundary before it reaches UI widgets.
+- Preserve the platform-aware base URL selection in `CctvService` (`localhost:3000` on web, `10.0.2.2:3000` on the Android emulator) when modifying networking code. An optional `BACKEND_URL` key in `.env` overrides this for physical-device testing (a real phone cannot reach `localhost`/`10.0.2.2`); leave it empty to keep the automatic fallback.
+- Validate and normalize external data (backend JSON, OSRM/Nominatim/Overpass responses) at the service boundary before it reaches UI widgets.
+- Road-segment geometry for the Map tab is resolved by `lib/services/road_segment_service.dart` (Overpass API), cached in-memory per camera coordinate for the app session. Shared point-projection/densify/arc-length-clip geometry helpers used by both the Map and Routing tabs live in `lib/services/geo_utils.dart` — extend that file rather than duplicating projection math in a screen or another service.
+- Location permission checks and continuous position tracking go through `lib/services/location_service.dart` (`LocationService.ensureAccess()`/`watchPosition()`/`getCurrentPosition()`) rather than calling `Geolocator` permission APIs directly in a screen — this replaced logic that used to be duplicated across `map_screen.dart` and `routing_screen.dart`. The service is stateless (it does not hold a live `StreamSubscription` itself); each screen owns and cancels its own subscription.
 
 ## 7. State and Persistence
 
@@ -83,6 +85,7 @@ This document records the naming conventions, formatting practices, and implemen
 ## 10. Error Handling and Logging
 
 - Use `try`/`catch` around all network calls (backend, OSRM, Nominatim, Google Sign-In) and fail to a safe, empty/fallback state rather than letting exceptions reach the UI unhandled — this matches the existing pattern in `CctvService` and `RoutePlanner`.
+- Store any `StreamSubscription` (e.g. from `LocationService.watchPosition()`) in a nullable field and cancel it in `dispose()`, matching the existing `Timer?`-cancel-in-`dispose()` idiom already used for `_statusPollTimer`/`_rerouteTimer`/`_searchDebounce`. Do not discard a `Stream`'s `.listen()` subscription without storing it — a nulled `Stream` reference does not stop the underlying listener.
 - Use `print()` debug logging with an emoji status marker and a bracketed feature tag, matching the existing convention: `🔌`/`📡`/`✅`/`❌`/`⚠️` prefixes with tags like `[CCTV]`, `[Alerts]`, `[Notifications]`, `[Auth]`. Keep this convention rather than introducing a separate logging package.
 - Route planning must record structured metrics via `RoutingTestLogger` (`lib/services/routing_test_logger.dart`) rather than ad hoc print statements, since these logs are used for empirical evaluation.
 - Never log credentials or the MongoDB connection string.
@@ -102,7 +105,7 @@ The following patterns exist in the current repository but should not be expande
 - Legacy "Subay"/"SUBAY" naming remains in several places even though the product is branded FloodSight: `pubspec.yaml` (`name: subay`), the `SubayApp` class in `lib/main.dart`, `README.md`, `lib/services/auth_service.dart` and `lib/services/geocoding_service.dart` (fallback strings/User-Agent), `lib/screens/login_screen.dart` and `lib/screens/profile_screen.dart` (fallback display text), Android (`android/app/build.gradle.kts`, `AndroidManifest.xml`), iOS (`ios/Runner/Info.plist`), `web/manifest.json`, `backend/package.json`, `backend/server.js`, and `test/widget_test.dart`. Rename only as a deliberate, coordinated rebrand — not incidentally while touching nearby code.
 - The Android application/package identifiers are inconsistent between `lib/screens/map_screen.dart` (`com.subay.app` tile-layer user agent) and `lib/screens/routing_screen.dart` (`com.example.subay`); reconcile these together with the broader rebrand rather than picking one ad hoc.
 - The MongoDB Atlas connection string is hardcoded in `backend/server.js` instead of read from an environment variable; do not copy this pattern into new backend code, and migrate it to `.env`/`process.env` when the backend is next touched. This change should also use `process.env.MONGODB_DB` and `process.env.MONGODB_COLLECTION` when available.
-- There is no `.env`/config abstraction for the Flutter app's backend base URL on physical devices (only web and Android-emulator cases are auto-detected); document this limitation rather than silently breaking on-device testing.
+- Resolved: physical-device backend access is now handled via an optional `BACKEND_URL` key in `.env` (see §6), read by `CctvService._baseUrl` ahead of the web/emulator auto-detection.
 
 ## 13. Change Checklist
 

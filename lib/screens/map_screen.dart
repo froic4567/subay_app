@@ -5,7 +5,12 @@ import 'package:latlong2/latlong.dart' hide Path;
 import 'package:geolocator/geolocator.dart';
 import '../services/cctv_service.dart';
 import '../services/geocoding_service.dart';
+import '../services/location_service.dart';
+import '../services/road_segment_service.dart';
 import '../theme/app_colors.dart';
+import '../theme/app_radius.dart';
+import '../theme/app_shadows.dart';
+import '../widgets/status_badge.dart';
 
 // ── Vehicle passability model ─────────────────────────────────────────────────
 
@@ -97,9 +102,17 @@ class _MapScreenState extends State<MapScreen> {
   final _searchFocus = FocusNode();
   bool _isLocating = false;
   LatLng? _currentLocation;
+  StreamSubscription<Position>? _positionSub;
 
   // CCTV locations fetched from MongoDB via backend API
   List<CctvLocation> _cctvLocations = [];
+  bool _hasLoadedOnce = false;
+
+  // Road segments covered by each camera, keyed by CctvLocation.id.
+  // Populated asynchronously via RoadSegmentService and cached there, so
+  // repeated polls only refresh status/color, not geometry.
+  Map<String, RoadSegmentResult> _roadSegments = {};
+  Timer? _statusPollTimer;
 
   // Search state
   Timer? _searchDebounce;
@@ -118,8 +131,15 @@ class _MapScreenState extends State<MapScreen> {
     super.initState();
     _searchController.addListener(_onSearchChanged);
     _loadCctvData();
+    // Keeps flood status (and therefore segment color) fresh without a
+    // manual refresh, mirroring routing_screen.dart's reroute-polling
+    // cadence. Road geometry itself is cached in RoadSegmentService, so
+    // this only re-fetches status/color on each tick, not geometry.
+    _statusPollTimer =
+        Timer.periodic(const Duration(seconds: 5), (_) => _loadCctvData());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _goToCurrentLocation();
+      _startLocationTracking();
     });
   }
 
@@ -129,19 +149,40 @@ class _MapScreenState extends State<MapScreen> {
     print('🗺️ [Map] Loading CCTV data...');
     final docs = await CctvService.fetchCctvData();
     print('🗺️ [Map] Total records to display: ${docs.length}');
-    
+
     if (mounted) {
+      final locations = docs.asMap().entries.map((entry) {
+        final cctv = _convertDocToCctv(entry.key, entry.value);
+        print('📍 [Map] CCTV #${entry.key + 1}: status=${cctv.status}, '
+            'waterLevel=${cctv.floodHeight}m, '
+            'position=${cctv.position.latitude},${cctv.position.longitude}');
+        return cctv;
+      }).toList();
       setState(() {
-        _cctvLocations = docs.asMap().entries.map((entry) {
-          final cctv = _convertDocToCctv(entry.key, entry.value);
-          print('📍 [Map] CCTV #${entry.key + 1}: status=${cctv.status}, '
-              'waterLevel=${cctv.floodHeight}m, '
-              'position=${cctv.position.latitude},${cctv.position.longitude}');
-          return cctv;
-        }).toList();
+        _cctvLocations = locations;
+        _hasLoadedOnce = true;
       });
       print('✅ [Map] Displaying ${_cctvLocations.length} CCTV markers on map');
+      _loadRoadSegments(locations);
     }
+  }
+
+  /// Resolves the road segment each camera monitors (via RoadSegmentService,
+  /// which caches by coordinate) and updates the map once all lookups
+  /// settle. Markers already show from _loadCctvData; this only adds the
+  /// road-coloring layer on top a moment later.
+  Future<void> _loadRoadSegments(List<CctvLocation> locations) async {
+    final entries = await Future.wait(locations.map((loc) async {
+      final segment = await RoadSegmentService.getSegmentForCamera(loc.position);
+      return MapEntry(loc.id, segment);
+    }));
+    if (!mounted) return;
+    setState(() {
+      _roadSegments = {
+        for (final entry in entries)
+          if (entry.value != null) entry.key: entry.value!,
+      };
+    });
   }
 
   /// Converts a MongoDB CCTV document to a CctvLocation.
@@ -156,7 +197,7 @@ class _MapScreenState extends State<MapScreen> {
     //   },
     //   "timestamp": "2026-07-15T07:30:00Z"
     // }
-    
+
     final coordinates = doc['location']['coordinates'] as List<dynamic>;
     final longitude = (coordinates[0] as num).toDouble();
     final latitude = (coordinates[1] as num).toDouble();
@@ -202,6 +243,8 @@ class _MapScreenState extends State<MapScreen> {
   @override
   void dispose() {
     _searchDebounce?.cancel();
+    _statusPollTimer?.cancel();
+    _positionSub?.cancel();
     _searchController.dispose();
     _searchFocus.dispose();
     _mapController.dispose();
@@ -258,9 +301,9 @@ class _MapScreenState extends State<MapScreen> {
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
       builder: (_) => Container(
-        decoration: const BoxDecoration(
+        decoration: BoxDecoration(
           color: Colors.white,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xxl)),
         ),
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 28),
         child: Column(
@@ -323,14 +366,6 @@ class _MapScreenState extends State<MapScreen> {
                   'Get Directions',
                   style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
                 ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.primary,
-                  foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  padding: const EdgeInsets.symmetric(vertical: 13),
-                ),
               ),
             ),
           ],
@@ -380,23 +415,47 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  /// Subscribes to a continuous GPS stream so `_currentLocation` (and thus
+  /// the "my location" marker) stays live without requiring the location
+  /// button to be pressed, regardless of navigation state or which tab is
+  /// active — `IndexedStack` in home_screen.dart keeps this screen's state
+  /// (and this subscription) alive across tab switches.
+  ///
+  /// Deliberately never moves the map camera — only `_goToCurrentLocation`
+  /// (the button, and the initial center-on-open) does that, so continuous
+  /// updates don't fight the user's own panning/zooming.
+  Future<void> _startLocationTracking() async {
+    final stream = await LocationService.watchPosition(
+      accuracy: LocationAccuracy.high,
+    );
+    if (stream == null || !mounted) return;
+    _positionSub = stream.listen((pos) {
+      if (!mounted) return;
+      setState(() => _currentLocation = LatLng(pos.latitude, pos.longitude));
+    });
+  }
+
   Future<void> _goToCurrentLocation() async {
     setState(() => _isLocating = true);
 
-    final pos = await _determinePosition();
-    if (pos != null) {
-      final latlng = LatLng(pos.latitude, pos.longitude);
-      if (mounted) {
-        setState(() => _currentLocation = latlng);
-        try {
-          _mapController.move(latlng, 16);
-        } catch (_) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            try {
-              _mapController.move(latlng, 16);
-            } catch (_) {}
-          });
-        }
+    LatLng? latlng = _currentLocation;
+    if (latlng == null) {
+      final pos = await _determinePosition();
+      if (pos != null) {
+        latlng = LatLng(pos.latitude, pos.longitude);
+        if (mounted) setState(() => _currentLocation = latlng);
+      }
+    }
+
+    if (latlng != null && mounted) {
+      try {
+        _mapController.move(latlng, 16);
+      } catch (_) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          try {
+            _mapController.move(latlng!, 16);
+          } catch (_) {}
+        });
       }
     }
 
@@ -427,6 +486,28 @@ class _MapScreenState extends State<MapScreen> {
       ),
     );
   }
+
+  // ── Road segments ────────────────────────────────────────────────────────
+
+  List<Polyline> _buildSegmentOutlinePolylines() => [
+        for (final loc in _cctvLocations)
+          if (_roadSegments[loc.id] != null)
+            Polyline(
+              points: _roadSegments[loc.id]!.points,
+              strokeWidth: 7.0,
+              color: AppColors.segmentOutline.withValues(alpha: 0.35),
+            ),
+      ];
+
+  List<Polyline> _buildSegmentColorPolylines() => [
+        for (final loc in _cctvLocations)
+          if (_roadSegments[loc.id] != null)
+            Polyline(
+              points: _roadSegments[loc.id]!.points,
+              strokeWidth: 4.0,
+              color: loc.statusColor,
+            ),
+      ];
 
   // ── Markers ───────────────────────────────────────────────────────────────
 
@@ -563,6 +644,10 @@ class _MapScreenState extends State<MapScreen> {
                 userAgentPackageName: 'com.subay.app',
                 maxZoom: 19,
               ),
+              if (_roadSegments.isNotEmpty) ...[
+                PolylineLayer(polylines: _buildSegmentOutlinePolylines()),
+                PolylineLayer(polylines: _buildSegmentColorPolylines()),
+              ],
               MarkerLayer(markers: _buildMarkers()),
             ],
           ),
@@ -575,9 +660,13 @@ class _MapScreenState extends State<MapScreen> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Material(
-                  elevation: 3,
-                  borderRadius: BorderRadius.circular(10),
+                Container(
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(AppRadius.lg),
+                    boxShadow: AppShadows.base,
+                  ),
+                  clipBehavior: Clip.antiAlias,
                   child: TextField(
                     controller: _searchController,
                     focusNode: _searchFocus,
@@ -625,6 +714,41 @@ class _MapScreenState extends State<MapScreen> {
                     ),
                   ),
                 ),
+                // First-load affordance — makes the initial "no markers yet"
+                // moment read as loading rather than empty.
+                if (!_hasLoadedOnce)
+                  Container(
+                    margin: const EdgeInsets.only(top: 6),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(AppRadius.lg),
+                      boxShadow: AppShadows.sm,
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: AppColors.primary,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          'Loading flood data…',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                            color: AppColors.textMuted,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 // Search suggestions dropdown
                 if (_showSuggestions && (_searchResults.isNotEmpty || _isSearching))
                   Container(
@@ -632,14 +756,8 @@ class _MapScreenState extends State<MapScreen> {
                     constraints: const BoxConstraints(maxHeight: 250),
                     decoration: BoxDecoration(
                       color: Colors.white,
-                      borderRadius: BorderRadius.circular(10),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.12),
-                          blurRadius: 10,
-                          offset: const Offset(0, 4),
-                        ),
-                      ],
+                      borderRadius: BorderRadius.circular(AppRadius.lg),
+                      boxShadow: AppShadows.lg,
                     ),
                     child: _isSearching && _searchResults.isEmpty
                         ? const Padding(
@@ -736,13 +854,8 @@ class _MapScreenState extends State<MapScreen> {
                   const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
               decoration: BoxDecoration(
                 color: Colors.white.withValues(alpha: 0.95),
-                borderRadius: BorderRadius.circular(8),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.1),
-                    blurRadius: 4,
-                  ),
-                ],
+                borderRadius: BorderRadius.circular(AppRadius.md),
+                boxShadow: AppShadows.sm,
               ),
               child: const Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -783,8 +896,7 @@ class _MapScreenState extends State<MapScreen> {
             child: FloatingActionButton(
               heroTag: 'route',
               onPressed: () => widget.onGoToRouteWithDestination?.call(),
-              backgroundColor: AppColors.primary,
-              child: const Icon(Icons.route, color: Colors.white),
+              child: const Icon(Icons.route),
             ),
           ),
 
@@ -796,44 +908,82 @@ class _MapScreenState extends State<MapScreen> {
 
 // ── CCTV Pin ──────────────────────────────────────────────────────────────────
 
-class _CctvPin extends StatelessWidget {
+class _CctvPin extends StatefulWidget {
   final CctvLocation location;
   const _CctvPin({required this.location});
 
   @override
+  State<_CctvPin> createState() => _CctvPinState();
+}
+
+class _CctvPinState extends State<_CctvPin> with SingleTickerProviderStateMixin {
+  AnimationController? _controller;
+
+  bool get _isDanger => widget.location.status == 'DANGER';
+
+  @override
+  void initState() {
+    super.initState();
+    if (_isDanger) _startPulse();
+  }
+
+  void _startPulse() {
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1600),
+    )..repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _controller?.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final location = widget.location;
+    final pill = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      decoration: BoxDecoration(
+        color: location.statusColor,
+        borderRadius: BorderRadius.circular(AppRadius.md),
+        boxShadow: [
+          BoxShadow(
+            color: location.statusColor.withValues(alpha: 0.35),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.videocam, color: Colors.white, size: 11),
+          const SizedBox(width: 3),
+          Text(
+            location.status,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-          decoration: BoxDecoration(
-            color: location.statusColor,
-            borderRadius: BorderRadius.circular(8),
-            boxShadow: [
-              BoxShadow(
-                color: location.statusColor.withValues(alpha: 0.35),
-                blurRadius: 6,
-                offset: const Offset(0, 2),
-              ),
-            ],
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.videocam, color: Colors.white, size: 11),
-              const SizedBox(width: 3),
-              Text(
-                location.status,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 10,
-                  fontWeight: FontWeight.w700,
+        _controller == null
+            ? pill
+            : FadeTransition(
+                opacity: Tween(begin: 1.0, end: 0.5).animate(
+                  CurvedAnimation(parent: _controller!, curve: Curves.easeInOut),
                 ),
+                child: pill,
               ),
-            ],
-          ),
-        ),
         CustomPaint(
           painter: _TrianglePainter(color: location.statusColor),
           size: const Size(10, 6),
@@ -901,9 +1051,9 @@ class _CctvBottomSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xxl)),
       ),
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 28),
       child: Column(
@@ -964,20 +1114,7 @@ class _CctvBottomSheet extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: location.statusLightColor,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(location.status,
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                    color: location.statusTextColor,
-                  )),
-              ),
+              StatusBadge(status: location.status, pulse: true),
             ],
           ),
           const SizedBox(height: 12),
@@ -987,7 +1124,7 @@ class _CctvBottomSheet extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             decoration: BoxDecoration(
               color: AppColors.infoLight,
-              borderRadius: BorderRadius.circular(10),
+              borderRadius: BorderRadius.circular(AppRadius.lg),
             ),
             child: Row(
               children: [
@@ -1048,13 +1185,6 @@ class _CctvBottomSheet extends StatelessWidget {
                 'Go to Route',
                 style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
               ),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.primary,
-                foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10)),
-                padding: const EdgeInsets.symmetric(vertical: 13),
-              ),
             ),
           ),
         ],
@@ -1086,7 +1216,7 @@ class _VehicleRow extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
         color: bgColor,
-        borderRadius: BorderRadius.circular(9),
+        borderRadius: BorderRadius.circular(AppRadius.md),
       ),
       child: Row(
         children: [

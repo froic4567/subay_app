@@ -1,0 +1,571 @@
+/* ============================================================================
+   FloodSight — Web App Design Reference
+   ============================================================================
+   Purpose:
+     This file documents the ACTUAL, current visual identity of the FloodSight
+     web dashboard (React + TanStack Start + Tailwind CSS v4 + shadcn/ui
+     "new-york" style). It exists as the reference artifact called for by the
+     FloodSight Mobile Application's UI/UX spec ("A CSS file from the
+     FloodSight web application will be provided in the project folder for
+     reference"), so the Flutter mobile team can translate this design
+     language into Flutter widgets/themes without copying it directly.
+
+   Provenance:
+     Every value below was verified against the live source, not invented:
+       - src/styles.css                          (theme tokens, radius scale)
+       - src/components/floodsight/CameraMap.tsx  (map marker status colors)
+       - src/components/floodsight/DangerLegend.tsx (map legend colors)
+       - src/components/floodsight/StatusBadge.tsx (status badge styling)
+       - src/components/floodsight/AppShell.tsx    (header/nav)
+       - src/components/floodsight/NotificationSidebar.tsx
+       - src/components/ui/{button,card,badge}.tsx (shadcn primitives)
+       - src/components/auth/Login.jsx             (login brand colors)
+
+     Colors are authored in OKLCH in the web app (Tailwind v4 default). Hex
+     equivalents are given in comments for readers/tools that need sRGB.
+     Typography, spacing, and shadows use Tailwind's UNMODIFIED default
+     scales — the web app defines no custom font, spacing, or shadow tokens.
+
+   This file is plain, standalone CSS. It does not depend on Tailwind's
+   build pipeline (no @apply, no @theme) so it can be read/parsed outside
+   this project.
+   ============================================================================ */
+
+
+/* ----------------------------------------------------------------------------
+   1. COLOR PALETTE — LIGHT (default / only mode currently shown to users)
+   ---------------------------------------------------------------------------- */
+:root {
+  --radius: 0.625rem; /* 10px — base radius, see section 4 */
+
+  --color-background:          oklch(0.985 0.005 240);  /* ~#F9FAFB near-white, cool tint */
+  --color-foreground:          oklch(0.18  0.04  250);  /* ~#111827 dark slate text */
+
+  --color-card:                oklch(1     0     0);    /* #FFFFFF */
+  --color-card-foreground:     oklch(0.18  0.04  250);  /* ~#111827 */
+
+  --color-popover:             oklch(1     0     0);    /* #FFFFFF */
+  --color-popover-foreground:  oklch(0.18  0.04  250);  /* ~#111827 */
+
+  --color-primary:             oklch(0.58  0.17  245);  /* ~#2C6FD1 brand blue */
+  --color-primary-foreground:  oklch(0.99  0     0);    /* ~#FCFCFC */
+
+  --color-secondary:           oklch(0.968 0.007 247.896); /* ~#F1F5F9 */
+  --color-secondary-foreground:oklch(0.25  0.04  250);  /* ~#1E2A3D */
+
+  --color-muted:                oklch(0.968 0.007 247.896); /* ~#F1F5F9 */
+  --color-muted-foreground:     oklch(0.554 0.046 257.417); /* ~#64748B */
+
+  --color-accent:               oklch(0.94  0.03  240);  /* ~#E4EEF9 pale blue */
+  --color-accent-foreground:    oklch(0.25  0.04  250);  /* ~#1E2A3D */
+
+  --color-destructive:          oklch(0.577 0.245 27.325); /* ~#DC2626 red */
+  --color-destructive-foreground: oklch(0.984 0.003 247.858); /* ~#F8FAFC */
+
+  --color-border:               oklch(0.929 0.013 255.508); /* ~#E2E8F0 */
+  --color-input:                oklch(0.929 0.013 255.508); /* ~#E2E8F0 */
+  --color-ring:                 oklch(0.58  0.17  245);   /* same as primary */
+
+  --color-sidebar:                    oklch(0.984 0.003 247.858); /* ~#F8FAFC */
+  --color-sidebar-foreground:         oklch(0.129 0.042 264.695); /* ~#0F172A */
+  --color-sidebar-primary:            oklch(0.208 0.042 265.755); /* ~#1E293B */
+  --color-sidebar-primary-foreground: oklch(0.984 0.003 247.858); /* ~#F8FAFC */
+  --color-sidebar-accent:             oklch(0.968 0.007 247.896); /* ~#F1F5F9 */
+  --color-sidebar-accent-foreground:  oklch(0.208 0.042 265.755); /* ~#1E293B */
+  --color-sidebar-border:             oklch(0.929 0.013 255.508); /* ~#E2E8F0 */
+  --color-sidebar-ring:               oklch(0.704 0.04  256.788); /* ~#94A3B8 */
+
+  /* Chart palette (used in analytics/trend charts) */
+  --color-chart-1: oklch(0.646 0.222 41.116);  /* orange  ~#E8834B */
+  --color-chart-2: oklch(0.6   0.118 184.704); /* teal    ~#3D9AA0 */
+  --color-chart-3: oklch(0.398 0.07  227.392); /* dark blue ~#2B4C6F */
+  --color-chart-4: oklch(0.828 0.189 84.429);  /* gold    ~#E8C547 */
+  --color-chart-5: oklch(0.769 0.188 70.08);   /* amber   ~#DDA53D */
+}
+
+/* ----------------------------------------------------------------------------
+   1b. COLOR PALETTE — DARK
+   ---------------------------------------------------------------------------
+   NOTE: This palette exists in the web app's stylesheet (a `.dark` class),
+   but the app has NO theme toggle anywhere — dark mode is defined but never
+   activated for real users today. Included here for completeness in case
+   the Flutter app wants to support dark mode; treat as "available, unused."
+   Flood status colors (section 2) do NOT change between light and dark —
+   the web app never overrides them in `.dark`.
+   ---------------------------------------------------------------------------- */
+[data-theme="dark"] {
+  --color-background:          oklch(0.129 0.042 264.695); /* ~#0B0F19 near-black navy */
+  --color-foreground:          oklch(0.984 0.003 247.858); /* ~#F8FAFC */
+
+  --color-card:                oklch(0.208 0.042 265.755); /* ~#1E293B slate */
+  --color-card-foreground:     oklch(0.984 0.003 247.858); /* ~#F8FAFC */
+
+  --color-popover:             oklch(0.208 0.042 265.755); /* ~#1E293B */
+  --color-popover-foreground:  oklch(0.984 0.003 247.858); /* ~#F8FAFC */
+
+  --color-primary:             oklch(0.929 0.013 255.508); /* ~#E2E8F0 near-white */
+  --color-primary-foreground:  oklch(0.208 0.042 265.755); /* ~#1E293B */
+
+  --color-secondary:           oklch(0.279 0.041 260.031); /* ~#334155 */
+  --color-secondary-foreground:oklch(0.984 0.003 247.858); /* ~#F8FAFC */
+
+  --color-muted:                oklch(0.279 0.041 260.031); /* ~#334155 */
+  --color-muted-foreground:     oklch(0.704 0.04  256.788); /* ~#94A3B8 */
+
+  --color-accent:               oklch(0.279 0.041 260.031); /* ~#334155 */
+  --color-accent-foreground:    oklch(0.984 0.003 247.858); /* ~#F8FAFC */
+
+  --color-destructive:          oklch(0.704 0.191 22.216);  /* ~#F87171 lighter red */
+  --color-destructive-foreground: oklch(0.984 0.003 247.858); /* ~#F8FAFC */
+
+  --color-border:               oklch(1 0 0 / 10%); /* white @ 10% opacity */
+  --color-input:                oklch(1 0 0 / 15%); /* white @ 15% opacity */
+  --color-ring:                 oklch(0.551 0.027 264.364); /* ~#71717A */
+
+  --color-sidebar:                    oklch(0.208 0.042 265.755); /* ~#1E293B */
+  --color-sidebar-foreground:         oklch(0.984 0.003 247.858); /* ~#F8FAFC */
+  --color-sidebar-primary:            oklch(0.488 0.243 264.376); /* ~#4F5FE8 */
+  --color-sidebar-primary-foreground: oklch(0.984 0.003 247.858); /* ~#F8FAFC */
+  --color-sidebar-accent:             oklch(0.279 0.041 260.031); /* ~#334155 */
+  --color-sidebar-accent-foreground:  oklch(0.984 0.003 247.858); /* ~#F8FAFC */
+  --color-sidebar-border:             oklch(1 0 0 / 10%);
+  --color-sidebar-ring:               oklch(0.551 0.027 264.364); /* ~#71717A */
+
+  --color-chart-1: oklch(0.488 0.243 264.376); /* indigo  ~#4F5FE8 */
+  --color-chart-2: oklch(0.696 0.17  162.48);  /* green   ~#3FBF8F */
+  --color-chart-3: oklch(0.769 0.188 70.08);   /* amber   ~#DDA53D */
+  --color-chart-4: oklch(0.627 0.265 303.9);   /* purple  ~#B45FE0 */
+  --color-chart-5: oklch(0.645 0.246 16.439);  /* red-orange ~#E8583F */
+}
+
+
+/* ----------------------------------------------------------------------------
+   2. FLOOD STATUS COLORS  ⚠ MOST IMPORTANT SECTION FOR MOBILE PARITY ⚠
+   ---------------------------------------------------------------------------
+   Status values: "NORMAL" | "ALERT" | "DANGER"
+   Thresholds (water level in meters): <0.5m = NORMAL, 0.5–1.5m = ALERT,
+   ≥1.5m = DANGER. Severity order (most severe first): DANGER, ALERT, NORMAL.
+
+   IMPORTANT — the web app currently has TWO PARALLEL, SLIGHTLY DIFFERENT
+   color systems for status. This is a real inconsistency in the source
+   app, documented here as-is rather than silently reconciled:
+
+   (A) OKLCH tokens — used for UI chrome: status badges, dashboard stat
+       cards, notification sidebar dots/text.
+   (B) Hardcoded hex — used for the Leaflet map: marker pins and the map
+       legend. Chosen as plain hex because Leaflet renders markers via
+       raw injected HTML/SVG, which doesn't reliably resolve CSS custom
+       properties from the host page.
+
+   The two systems are visually close (same hue family per status) but not
+   pixel-identical. Pick ONE per your own design system in Flutter — if in
+   doubt, hex (B) is the more literal, saturated version and is what users
+   actually see most (on the map, which is the primary UI surface per the
+   mobile spec).
+   ---------------------------------------------------------------------------- */
+
+/* (A) OKLCH tokens — UI chrome (badges, stat cards, notification sidebar) */
+:root {
+  --status-normal-oklch: oklch(0.7  0.17 145); /* green  ~#4ADE80-ish */
+  --status-alert-oklch:  oklch(0.82 0.17 85);  /* amber/yellow ~#F2C94C-ish */
+  --status-danger-oklch: oklch(0.6  0.23 27);  /* red    ~#E5484D-ish */
+
+  /* One-off darker amber used ONLY for ALERT badge text (contrast fix) */
+  --status-alert-text-oklch: oklch(0.45 0.15 75); /* dark amber ~#8A5A12-ish */
+}
+
+/* (B) Hex — Leaflet map markers + legend (DangerLegend.tsx, CameraMap.tsx) */
+:root {
+  --status-normal-hex: #22c55e; /* Tailwind green-500 */
+  --status-alert-hex:  #f59e0b; /* Tailwind amber-500 */
+  --status-danger-hex: #ef4444; /* Tailwind red-500 */
+}
+
+/* Reference badge styling (custom StatusBadge component — pill shape) */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;             /* 6px, dot-to-label spacing */
+  border-radius: 9999px;     /* fully rounded pill */
+  padding: 0.25rem 0.625rem; /* py-1 px-2.5 */
+  font-size: 0.75rem;        /* 12px */
+  font-weight: 600;
+  letter-spacing: 0.025em;
+  border: 1px solid transparent; /* ring, colored per status below */
+}
+.status-badge__dot {
+  width: 0.375rem;   /* 6px */
+  height: 0.375rem;
+  border-radius: 9999px;
+}
+.status-badge--normal {
+  background: color-mix(in oklch, var(--status-normal-oklch) 15%, transparent);
+  color: var(--status-normal-oklch);
+  border-color: color-mix(in oklch, var(--status-normal-oklch) 30%, transparent);
+}
+.status-badge--alert {
+  background: color-mix(in oklch, var(--status-alert-oklch) 20%, transparent);
+  color: var(--status-alert-text-oklch); /* darker amber for contrast */
+  border-color: color-mix(in oklch, var(--status-alert-oklch) 40%, transparent);
+}
+.status-badge--danger {
+  background: color-mix(in oklch, var(--status-danger-oklch) 15%, transparent);
+  color: var(--status-danger-oklch);
+  border-color: color-mix(in oklch, var(--status-danger-oklch) 30%, transparent);
+}
+/* DANGER rows in the notification sidebar pulse their status dot */
+.status-badge--danger .status-badge__dot {
+  animation: status-pulse 1.6s ease-in-out infinite;
+}
+@keyframes status-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+
+
+/* ----------------------------------------------------------------------------
+   3. TYPOGRAPHY
+   ---------------------------------------------------------------------------
+   The web app defines NO custom webfont — no @font-face, no Google Fonts
+   link, no font-family override anywhere. It runs entirely on Tailwind's
+   default system font stacks:
+   ---------------------------------------------------------------------------- */
+:root {
+  --font-sans: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji",
+               "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+               "Liberation Mono", "Courier New", monospace;
+}
+
+/* font-mono is used for: water-level readouts on camera snapshots,
+   config reference values, and chart tooltip numeric values. */
+
+/* Observed text patterns, translated from Tailwind utility classes into
+   literal CSS (font-weight values are Tailwind defaults: medium=500,
+   semibold=600, bold=700 — never overridden in this app). */
+.text-page-title {       /* e.g. "Live Flood Watch", "Map View" */
+  font-size: 1.5rem;      /* text-2xl */
+  font-weight: 700;
+  letter-spacing: -0.025em; /* tracking-tight */
+}
+.text-section-label {    /* small uppercase section headers */
+  font-size: 0.875rem;   /* text-sm */
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em; /* tracking-wider */
+  color: var(--color-muted-foreground);
+}
+.text-card-title {
+  font-size: 0.875rem;   /* text-sm */
+  font-weight: 600;
+  line-height: 1.375;    /* leading-snug */
+}
+.text-stat-number {      /* dashboard stat card big numbers */
+  font-size: 1.5rem;     /* text-2xl */
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.text-metric-value {
+  font-size: 0.875rem;   /* text-sm */
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.text-badge {
+  font-size: 0.75rem;    /* text-xs */
+  font-weight: 600;
+  letter-spacing: 0.025em;
+}
+.text-eyebrow {          /* e.g. app tagline "Watching the water, guiding the way" */
+  font-size: 0.625rem;   /* 10px */
+  text-transform: uppercase;
+  letter-spacing: 0.1em; /* tracking-widest */
+  color: var(--color-muted-foreground);
+}
+
+
+/* ----------------------------------------------------------------------------
+   4. BORDER RADIUS SCALE
+   ---------------------------------------------------------------------------
+   Single base variable (--radius), all other steps derived via calc().
+   ---------------------------------------------------------------------------- */
+:root {
+  --radius-sm:  calc(var(--radius) - 4px); /* 0.375rem / 6px  — small controls */
+  --radius-md:  calc(var(--radius) - 2px); /* 0.5rem   / 8px  — buttons, inputs, nav items */
+  --radius-lg:  var(--radius);             /* 0.625rem / 10px — base */
+  --radius-xl:  calc(var(--radius) + 4px); /* ~1.0625rem / 17px — cards */
+  --radius-2xl: calc(var(--radius) + 8px); /* ~1.125rem  / 18px — hero/notification panels */
+  --radius-3xl: calc(var(--radius) + 12px);/* ~1.1875rem / 19px */
+  --radius-4xl: calc(var(--radius) + 16px);/* 1.25rem    / 20px */
+  --radius-full: 9999px;                   /* badges, avatars, status dots */
+}
+/* Common usage: buttons/inputs/nav → --radius-md; cards → --radius-xl;
+   dashboard hero & notification sidebar panels → --radius-2xl;
+   badges/avatars/dots → --radius-full. */
+
+
+/* ----------------------------------------------------------------------------
+   5. SPACING
+   ---------------------------------------------------------------------------
+   No custom spacing scale — unmodified Tailwind default (0.25rem / 4px
+   increments). Most frequently observed values in this app:
+   ---------------------------------------------------------------------------- */
+:root {
+  --space-1:  0.25rem; /* 4px  */
+  --space-2:  0.5rem;  /* 8px  — gap-2 */
+  --space-2_5:0.625rem;/* 10px — badge px-2.5 */
+  --space-3:  0.75rem; /* 12px — p-3, gap-3 */
+  --space-4:  1rem;    /* 16px — p-4 */
+  --space-6:  1.5rem;  /* 24px — p-6, gap-6, space-y-6 */
+}
+
+
+/* ----------------------------------------------------------------------------
+   6. SHADOWS
+   ---------------------------------------------------------------------------
+   No custom box-shadow values defined — unmodified Tailwind default scale.
+   Reproduced here as literal values for portability.
+   ---------------------------------------------------------------------------- */
+:root {
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow:    0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+  --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+}
+/* Usage: cards → --shadow; buttons (default/secondary/outline) → --shadow
+   or --shadow-sm; active camera carousel card → --shadow-xl + a 2px
+   primary-tinted ring; avatar hover → --shadow-lg; map marker pins use a
+   one-off drop-shadow filter (see section 8). */
+
+
+/* ----------------------------------------------------------------------------
+   7. COMPONENT REFERENCE STYLES
+   ---------------------------------------------------------------------------- */
+
+/* --- Button (shadcn/ui) --- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  white-space: nowrap;
+  border-radius: var(--radius-md);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 150ms, color 150ms;
+  height: 2.25rem;      /* 36px, default size */
+  padding: 0 1rem;
+}
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn--sm { height: 2rem;   padding: 0 0.75rem; font-size: 0.75rem; }
+.btn--lg { height: 2.5rem; padding: 0 2rem; }
+.btn--icon { height: 2.25rem; width: 2.25rem; padding: 0; }
+
+.btn--default {
+  background: var(--color-primary);
+  color: var(--color-primary-foreground);
+  box-shadow: var(--shadow);
+}
+.btn--default:hover { background: color-mix(in oklch, var(--color-primary) 90%, transparent); }
+
+.btn--destructive {
+  background: var(--color-destructive);
+  color: var(--color-destructive-foreground);
+  box-shadow: var(--shadow-sm);
+}
+.btn--outline {
+  background: var(--color-background);
+  border: 1px solid var(--color-input);
+  box-shadow: var(--shadow-sm);
+}
+.btn--outline:hover { background: var(--color-accent); color: var(--color-accent-foreground); }
+
+.btn--secondary {
+  background: var(--color-secondary);
+  color: var(--color-secondary-foreground);
+  box-shadow: var(--shadow-sm);
+}
+.btn--ghost:hover { background: var(--color-accent); color: var(--color-accent-foreground); }
+.btn--link { color: var(--color-primary); text-underline-offset: 4px; }
+.btn--link:hover { text-decoration: underline; }
+
+/* --- Card (shadcn/ui) --- */
+.card {
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--color-border);
+  background: var(--color-card);
+  color: var(--color-card-foreground);
+  box-shadow: var(--shadow);
+}
+.card__header { display: flex; flex-direction: column; gap: 0.375rem; padding: 1.5rem; }
+.card__title { font-weight: 600; line-height: 1; letter-spacing: -0.025em; }
+.card__description { font-size: 0.875rem; color: var(--color-muted-foreground); }
+.card__content { padding: 1.5rem; padding-top: 0; }
+.card__footer { display: flex; align-items: center; padding: 1.5rem; padding-top: 0; }
+
+/* --- Badge (shadcn/ui, generic — distinct from .status-badge above) --- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  padding: 0.125rem 0.625rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.badge--default     { background: var(--color-primary); color: var(--color-primary-foreground); box-shadow: var(--shadow); }
+.badge--secondary    { background: var(--color-secondary); color: var(--color-secondary-foreground); }
+.badge--destructive  { background: var(--color-destructive); color: var(--color-destructive-foreground); box-shadow: var(--shadow); }
+.badge--outline      { color: var(--color-foreground); }
+
+/* --- App shell header / navigation --- */
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  height: 4rem; /* 64px */
+  border-bottom: 1px solid var(--color-border);
+  background: color-mix(in oklch, var(--color-card) 80%, transparent);
+  backdrop-filter: blur(8px);
+}
+.app-header__container {
+  max-width: 80rem; /* 1280px, max-w-7xl */
+  margin: 0 auto;
+  padding: 0 1rem;
+}
+.app-logo-mark {
+  height: 2.25rem; width: 2.25rem; /* 36px */
+  border-radius: var(--radius-lg);
+  background: var(--color-primary);
+  color: var(--color-primary-foreground);
+  display: flex; align-items: center; justify-content: center;
+}
+.app-name { font-size: 1rem; font-weight: 700; letter-spacing: -0.025em; }
+.app-tagline { font-size: 0.625rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--color-muted-foreground); }
+
+.nav-link {
+  border-radius: var(--radius-md);
+  padding: 0.375rem 0.75rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--color-muted-foreground);
+}
+.nav-link:hover { background: var(--color-accent); color: var(--color-foreground); }
+.nav-link--active { background: color-mix(in oklch, var(--color-primary) 10%, transparent); color: var(--color-primary); }
+
+/* --- Notification sidebar --- */
+.notification-panel {
+  width: 20rem; /* 320px */
+  flex-shrink: 0;
+  border-radius: var(--radius-2xl);
+  border: 1px solid var(--color-border);
+  background: var(--color-card);
+  padding: 1rem;
+}
+.notification-row {
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--color-border);
+  background: var(--color-card);
+  padding: 0.75rem;
+}
+.notification-row:hover {
+  border-color: color-mix(in oklch, var(--color-primary) 40%, transparent);
+  background: var(--color-accent);
+  box-shadow: var(--shadow-sm);
+}
+.notification-row--resolved { opacity: 0.7; } /* rows whose status returned to NORMAL */
+.notification-unread-count {
+  background: var(--color-destructive);
+  color: var(--color-destructive-foreground);
+  border-radius: var(--radius-full);
+}
+
+
+/* ----------------------------------------------------------------------------
+   8. MAP STYLING (Leaflet + OpenStreetMap tiles)
+   ---------------------------------------------------------------------------
+   - Tile source: https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png
+     attribution "© OpenStreetMap contributors", maxZoom 19.
+   - Default center: [8.4822, 124.6413] (Cagayan de Oro City), zoom 13.
+   - No route/road-segment polylines exist in the web app today — only
+     point markers per camera. (The mobile spec's "route lines / road-
+     status colors" will be new ground for both platforms.)
+   ---------------------------------------------------------------------------- */
+.map-container {
+  overflow: hidden;
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--color-border);
+}
+
+/* Camera marker pin — teardrop shape, 28x36px, colored per status (hex system) */
+.map-marker-pin {
+  width: 28px;
+  height: 36px;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3));
+  /* fill color = var(--status-normal-hex) / --status-alert-hex / --status-danger-hex */
+}
+.map-marker-pin__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 9999px;
+  background: #ffffff;
+}
+
+/* Map popup content (plain inline styles in source, not Tailwind) */
+.map-popup__image { border-radius: 6px; }
+.map-popup__title { font-weight: 600; font-size: 13px; }
+.map-popup__status-line { font-size: 12px; color: #666666; }
+.map-popup__timestamp { font-size: 11px; color: #999999; }
+
+/* Map legend (DangerLegend.tsx) */
+.map-legend { font-size: 11px; }
+.map-legend__dot { width: 8px; height: 8px; border-radius: 9999px; }
+/* legend dot colors: --status-normal-hex / --status-alert-hex / --status-danger-hex */
+
+
+/* ----------------------------------------------------------------------------
+   9. AUTH / LOGIN BRAND (src/components/auth/Login.jsx)
+   ---------------------------------------------------------------------------
+   A separate, marketing-style palette used ONLY on the login screen —
+   distinct from the app-shell design tokens above. Included since the
+   Flutter app will need matching brand colors on its own login screen.
+   ---------------------------------------------------------------------------- */
+:root {
+  --login-brand-blue:      #0080d7; /* icon, headline, uppercase eyebrow text */
+  --login-bg:              #f7fbfd;
+  --login-text:            #031222;
+  --login-card-border:     #e2e8f0;
+  --login-card-shadow:     rgba(0, 128, 215, 0.08); /* used with shadow-lg */
+  --login-secondary-text:  #62748e;
+
+  /* Error banner (10%/20%/full-opacity variants of the same red) */
+  --login-error-bg:     rgba(231, 0, 11, 0.1);
+  --login-error-border: rgba(231, 0, 11, 0.2);
+  --login-error-text:   #e7000b;
+
+  /* Google "G" logo brand colors (OAuth button) */
+  --google-blue:   #4285F4;
+  --google-green:  #34A853;
+  --google-yellow: #FBBC05;
+  --google-red:    #EA4335;
+  --google-btn-bg:       #4285F4;
+  --google-btn-bg-hover: #3367D6;
+  --google-btn-shadow:   rgba(66, 133, 244, 0.2); /* used with shadow-lg */
+}
+
+.login-card {
+  background: #ffffff;
+  border: 1px solid var(--login-card-border);
+  box-shadow: 0 10px 15px -3px var(--login-card-shadow), 0 4px 6px -4px var(--login-card-shadow);
+}
+.login-headline { color: var(--login-brand-blue); font-size: 1.875rem; font-weight: 700; }
+.login-error-banner {
+  background: var(--login-error-bg);
+  border: 1px solid var(--login-error-border);
+  color: var(--login-error-text);
+}
+.google-signin-btn {
+  background: var(--google-btn-bg);
+  box-shadow: 0 10px 15px -3px var(--google-btn-shadow), 0 4px 6px -4px var(--google-btn-shadow);
+}
+.google-signin-btn:hover { background: var(--google-btn-bg-hover); }

@@ -5,8 +5,11 @@ import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 import '../services/cctv_service.dart';
 import '../services/geocoding_service.dart';
+import '../services/location_service.dart';
 import '../services/route_planner.dart';
 import '../theme/app_colors.dart';
+import '../theme/app_radius.dart';
+import '../theme/app_shadows.dart';
 
 class RoutingScreen extends StatefulWidget {
   final LatLng? initialDestination;
@@ -58,6 +61,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
 
   // GPS tracking for navigation
   Stream<Position>? _positionStream;
+  StreamSubscription<Position>? _positionSub;
   LatLng? _currentPosition;
 
   // Default location (Cagayan de Oro, Philippines)
@@ -90,6 +94,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
     _originDebounce?.cancel();
     _destDebounce?.cancel();
     _rerouteTimer?.cancel();
+    _positionSub?.cancel();
     _positionStream = null;
     _destController.dispose();
     _originController.dispose();
@@ -200,19 +205,12 @@ class _RoutingScreenState extends State<RoutingScreen> {
 
   Future<void> _useCurrentLocation() async {
     try {
-      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
-      if (!serviceEnabled) {
+      final status = await LocationService.ensureAccess();
+      if (status == LocationAccessStatus.serviceDisabled) {
         _showLocationMessage('Please enable location services to use your current location.');
         return;
       }
-
-      var permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-      }
-
-      if (permission == LocationPermission.denied ||
-          permission == LocationPermission.deniedForever) {
+      if (status != LocationAccessStatus.granted) {
         _showLocationMessage('Location permission is required to use your current location.');
         return;
       }
@@ -351,27 +349,16 @@ class _RoutingScreenState extends State<RoutingScreen> {
   /// Starts GPS position tracking for navigation mode.
   void _startGpsTracking() async {
     try {
-      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
-      if (!serviceEnabled) return;
-
-      var permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-      }
-      if (permission == LocationPermission.denied ||
-          permission == LocationPermission.deniedForever) {
-        return;
-      }
+      final status = await LocationService.ensureAccess();
+      if (status != LocationAccessStatus.granted) return;
 
       // Start listening to position updates
-      _positionStream = Geolocator.getPositionStream(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-          distanceFilter: 10, // Update every 10 meters
-        ),
+      _positionStream = await LocationService.watchPosition(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 10, // Update every 10 meters
       );
 
-      _positionStream?.listen((Position position) {
+      _positionSub = _positionStream?.listen((Position position) {
         if (!mounted) return;
         final newLatLng = LatLng(position.latitude, position.longitude);
         setState(() {
@@ -386,6 +373,8 @@ class _RoutingScreenState extends State<RoutingScreen> {
   }
 
   void _stopGpsTracking() {
+    _positionSub?.cancel();
+    _positionSub = null;
     _positionStream = null;
     setState(() {
       _currentPosition = null;
@@ -721,7 +710,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
                   padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 16),
                   elevation: 8,
                   shadowColor: (_selectingOrigin ? AppColors.primary : AppColors.danger).withValues(alpha: 0.4),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
                 ),
                 child: const Text(
                   'Confirm Location',
@@ -759,14 +748,8 @@ class _RoutingScreenState extends State<RoutingScreen> {
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                 decoration: BoxDecoration(
                   color: AppColors.primary.withValues(alpha: 0.95),
-                  borderRadius: BorderRadius.circular(12),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.2),
-                      blurRadius: 8,
-                      offset: const Offset(0, 2),
-                    ),
-                  ],
+                  borderRadius: BorderRadius.circular(AppRadius.lg),
+                  boxShadow: AppShadows.base,
                 ),
                 child: Row(
                   children: [
@@ -808,10 +791,10 @@ class _RoutingScreenState extends State<RoutingScreen> {
               right: 0,
               child: Container(
                 padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
-                decoration: const BoxDecoration(
+                decoration: BoxDecoration(
                   color: Colors.white,
-                  borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-                  boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 14)],
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xxl)),
+                  boxShadow: AppShadows.lg,
                 ),
                 child: Row(
                   children: [
@@ -826,6 +809,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
                             fontSize: 24,
                             fontWeight: FontWeight.w800,
                             color: AppColors.textPrimary,
+                            fontFeatures: [FontFeature.tabularFigures()],
                           ),
                         ),
                         const SizedBox(height: 2),
@@ -847,7 +831,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
                       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                       decoration: BoxDecoration(
                         color: AppColors.backgroundSecondary,
-                        borderRadius: BorderRadius.circular(8),
+                        borderRadius: BorderRadius.circular(AppRadius.md),
                       ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
@@ -881,7 +865,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
                         backgroundColor: AppColors.danger,
                         foregroundColor: Colors.white,
                         shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10),
+                          borderRadius: BorderRadius.circular(AppRadius.md),
                         ),
                         padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
                       ),
@@ -917,13 +901,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
               decoration: BoxDecoration(
                 color: Colors.white,
                 shape: BoxShape.circle,
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.15),
-                    blurRadius: 12,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
+                boxShadow: AppShadows.lg,
               ),
               child: Material(
                 color: Colors.transparent,
@@ -967,13 +945,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
               child: Container(
               decoration: BoxDecoration(
                 color: Colors.white,
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.08),
-                    blurRadius: 12,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
+                boxShadow: AppShadows.base,
               ),
               padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
               child: Column(
@@ -1056,7 +1028,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                       decoration: BoxDecoration(
                         color: AppColors.backgroundSecondary,
-                        borderRadius: BorderRadius.circular(10),
+                        borderRadius: BorderRadius.circular(AppRadius.lg),
                       ),
                       child: Row(
                         children: [
@@ -1180,7 +1152,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
                               color: _selectingDestination
                                   ? AppColors.danger
                                   : AppColors.backgroundSecondary,
-                              borderRadius: BorderRadius.circular(10),
+                              borderRadius: BorderRadius.circular(AppRadius.lg),
                               border: _selectingDestination
                                   ? null
                                   : Border.all(
@@ -1263,13 +1235,13 @@ class _CompactActionButton extends StatelessWidget {
       color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(AppRadius.lg),
         splashColor: AppColors.primary.withValues(alpha: 0.1),
         child: Container(
           padding: const EdgeInsets.all(10),
           decoration: BoxDecoration(
             color: backgroundColor ?? AppColors.backgroundSecondary,
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: BorderRadius.circular(AppRadius.lg),
             border: borderColor == null
                 ? null
                 : Border.all(color: borderColor!, width: 1),
@@ -1310,7 +1282,7 @@ class _SearchField extends StatelessWidget {
     return Container(
       decoration: BoxDecoration(
         color: AppColors.backgroundSecondary,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(AppRadius.lg),
         border: Border.all(
           color: AppColors.normal.withValues(alpha: 0.1),
           width: 0.5,
@@ -1368,14 +1340,8 @@ class _SuggestionList extends StatelessWidget {
       constraints: const BoxConstraints(maxHeight: 220),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(10),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.12),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
+        borderRadius: BorderRadius.circular(AppRadius.lg),
+        boxShadow: AppShadows.lg,
       ),
       child: searching && results.isEmpty
           ? const Padding(
@@ -1481,10 +1447,10 @@ class _RouteBottomSheetState extends State<_RouteBottomSheet> {
     final avoidedNodes = result?.avoidedNodes ?? [];
 
     return Container(
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-        boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 14)],
+        borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xxl)),
+        boxShadow: AppShadows.lg,
       ),
       padding: const EdgeInsets.fromLTRB(16, 10, 16, 20),
       child: Column(
@@ -1529,6 +1495,7 @@ class _RouteBottomSheetState extends State<_RouteBottomSheet> {
                             fontSize: 18,
                             fontWeight: FontWeight.w800,
                             color: AppColors.textPrimary,
+                            fontFeatures: [FontFeature.tabularFigures()],
                           ),
                         ),
                       ],
@@ -1559,6 +1526,7 @@ class _RouteBottomSheetState extends State<_RouteBottomSheet> {
                             fontSize: 18,
                             fontWeight: FontWeight.w800,
                             color: AppColors.textPrimary,
+                            fontFeatures: [FontFeature.tabularFigures()],
                           ),
                         ),
                       ],
@@ -1578,12 +1546,12 @@ class _RouteBottomSheetState extends State<_RouteBottomSheet> {
                   _showAvoidedAreas = !_showAvoidedAreas;
                 });
               },
-              borderRadius: BorderRadius.circular(10),
+              borderRadius: BorderRadius.circular(AppRadius.lg),
               child: Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
                   color: AppColors.danger.withValues(alpha: 0.05),
-                  borderRadius: BorderRadius.circular(10),
+                  borderRadius: BorderRadius.circular(AppRadius.lg),
                   border: Border.all(
                     color: AppColors.danger.withValues(alpha: 0.2),
                     width: 1,
@@ -1700,11 +1668,6 @@ class _RouteBottomSheetState extends State<_RouteBottomSheet> {
                 style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
               ),
               style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.primary,
-                foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
                 padding: const EdgeInsets.symmetric(vertical: 14),
                 elevation: 2,
               ),
