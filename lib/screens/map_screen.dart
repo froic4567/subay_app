@@ -172,15 +172,15 @@ class _MapScreenState extends State<MapScreen> {
   /// settle. Markers already show from _loadCctvData; this only adds the
   /// road-coloring layer on top a moment later.
   Future<void> _loadRoadSegments(List<CctvLocation> locations) async {
-    final entries = await Future.wait(locations.map((loc) async {
-      final segment = await RoadSegmentService.getSegmentForCamera(loc.position);
-      return MapEntry(loc.id, segment);
-    }));
+    // Batch road-segment resolution: query OSM once per viewport area and
+    // match cameras locally to avoid many per-camera Overpass calls.
+    final idToCoord = {for (final l in locations) l.id: l.position};
+    final batch = await RoadSegmentService.getSegmentsForCoordinates(idToCoord);
     if (!mounted) return;
     setState(() {
       _roadSegments = {
-        for (final entry in entries)
-          if (entry.value != null) entry.key: entry.value!,
+        for (final e in batch.entries)
+          if (e.value != null) e.key: e.value!,
       };
     });
   }

@@ -7,6 +7,7 @@ import '../services/cctv_service.dart';
 import '../services/geocoding_service.dart';
 import '../services/location_service.dart';
 import '../services/route_planner.dart';
+import '../services/road_segment_service.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_radius.dart';
 import '../theme/app_shadows.dart';
@@ -29,6 +30,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
   final _destController = TextEditingController();
   final _originController = TextEditingController();
   final _mapController = MapController();
+  final GlobalKey _mapKey = GlobalKey();
   bool _routeFound = false;
   bool _selectingOrigin = false;
   bool _selectingDestination = false;
@@ -38,10 +40,13 @@ class _RoutingScreenState extends State<RoutingScreen> {
   LatLng? _destLatLng;
   VehicleType _selectedVehicleType = VehicleType.sedan;
   RoutePlanResult? _routePlanResult;
+  bool _pointerInteractionsEnabled = false;
 
   // CCTV data fetched from MongoDB via backend API
   List<Map<String, dynamic>> _cctvDocs = [];
   List<Map<String, dynamic>> _lastRoutedCctvSnapshot = [];
+  // Cached OSM road segments keyed by CCTV index string (matching _cctvDocs index -> id mapping)
+  Map<String, RoadSegmentResult> _roadSegments = {};
 
   // Search state
   Timer? _originDebounce;
@@ -72,6 +77,12 @@ class _RoutingScreenState extends State<RoutingScreen> {
     super.initState();
     _originController.addListener(_onOriginChanged);
     _destController.addListener(_onDestChanged);
+
+    // Enable pointer interactions after first frame to avoid early hit-tests
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      setState(() => _pointerInteractionsEnabled = true);
+    });
 
     // Fetch CCTV data from backend API
     _loadCctvData();
@@ -106,6 +117,35 @@ class _RoutingScreenState extends State<RoutingScreen> {
     final docs = await CctvService.fetchCctvData();
     if (mounted) {
       setState(() => _cctvDocs = docs);
+      // Also ensure road geometry is loaded (will be cache HIT for existing coords)
+      _loadRoadSegments(docs);
+    }
+  }
+
+  Future<void> _loadRoadSegments(List<Map<String, dynamic>> docs) async {
+    if (docs.isEmpty) return;
+    // Build id->LatLng map using stable string ids matching MapScreen convention
+    final idToCoord = <String, LatLng>{};
+    for (var i = 0; i < docs.length; i++) {
+      final doc = docs[i];
+      final coords = doc['location']['coordinates'] as List<dynamic>;
+      final lon = (coords[0] as num).toDouble();
+      final lat = (coords[1] as num).toDouble();
+      final id = (i + 1).toString();
+      idToCoord[id] = LatLng(lat, lon);
+    }
+
+    try {
+      final batch = await RoadSegmentService.getSegmentsForCoordinates(idToCoord);
+      if (!mounted) return;
+      setState(() {
+        _roadSegments = {
+          for (final e in batch.entries)
+            if (e.value != null) e.key: e.value!,
+        };
+      });
+    } catch (e) {
+      // Ignore — visualization can proceed without geometry
     }
   }
 
@@ -182,7 +222,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
       _showOriginSuggestions = false;
     });
     _suppressOriginSearch = false;
-    _mapController.move(result.latLng, 15);
+    _safeMapMove(result.latLng, 15);
     if (_destLatLng != null) {
       _buildRoute();
     }
@@ -197,7 +237,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
       _showDestSuggestions = false;
     });
     _suppressDestSearch = false;
-    _mapController.move(result.latLng, 15);
+    _safeMapMove(result.latLng, 15);
     if (_originLatLng != null) {
       _buildRoute();
     }
@@ -232,7 +272,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
         _selectingDestination = false;
       });
       _suppressOriginSearch = false;
-      _mapController.move(latlng, 16);
+      _safeMapMove(latlng, 16);
 
       // Reverse-geocode for a readable address label
       final address = await GeocodingService.reverseGeocode(latlng)
@@ -261,19 +301,102 @@ class _RoutingScreenState extends State<RoutingScreen> {
       return;
     }
 
-    try {
-      final bounds = LatLngBounds.fromPoints(validPoints);
-      _mapController.fitCamera(
-        CameraFit.bounds(
-          bounds: bounds,
-          padding: const EdgeInsets.all(72),
-        ),
-      );
-    } catch (_) {
-      // If bounds calculation fails, just center on the midpoint
-      final mid = validPoints[validPoints.length ~/ 2];
-      _mapController.move(mid, 14);
+    // Use safe fit that waits for the map to have valid layout.
+    _safeFitCamera(validPoints);
+  }
+
+  void _safeFitCamera(List<LatLng> validPoints) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final ctx = _mapKey.currentContext;
+      final ro = ctx?.findRenderObject();
+      if (ro is RenderBox && ro.hasSize && ro.size.width > 0 && ro.size.height > 0) {
+        try {
+          final bounds = LatLngBounds.fromPoints(validPoints);
+          _mapController.fitCamera(
+            CameraFit.bounds(bounds: bounds, padding: const EdgeInsets.all(72)),
+          );
+        } catch (e) {
+          final mid = validPoints[validPoints.length ~/ 2];
+          try {
+            _safeMapMove(mid, 14);
+          } catch (_) {}
+        }
+        return;
+      }
+
+      // Retry until the map has layout (max ~1s)
+      int attempts = 0;
+      Timer.periodic(const Duration(milliseconds: 50), (t) {
+        attempts++;
+        if (!mounted) {
+          t.cancel();
+          return;
+        }
+        final ro2 = _mapKey.currentContext?.findRenderObject();
+        if (ro2 is RenderBox && ro2.hasSize && ro2.size.width > 0 && ro2.size.height > 0) {
+          try {
+            final bounds = LatLngBounds.fromPoints(validPoints);
+            _mapController.fitCamera(
+              CameraFit.bounds(bounds: bounds, padding: const EdgeInsets.all(72)),
+            );
+          } catch (_) {
+            final mid = validPoints[validPoints.length ~/ 2];
+            try {
+              _mapController.move(mid, 14);
+            } catch (_) {}
+          }
+          t.cancel();
+          return;
+        }
+        if (attempts > 20) t.cancel();
+      });
+    });
+  }
+
+  void _safeMapMove(LatLng latlng, double zoom) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final ro = _mapKey.currentContext?.findRenderObject();
+      if (ro is RenderBox && ro.hasSize && ro.size.width > 0 && ro.size.height > 0) {
+        try {
+          _mapController.move(latlng, zoom);
+        } catch (e) {
+          print('[NavigationUI] Safe move failed: $e');
+        }
+        return;
+      }
+
+      int attempts = 0;
+      Timer.periodic(const Duration(milliseconds: 50), (t) {
+        attempts++;
+        if (!mounted) {
+          t.cancel();
+          return;
+        }
+        final ro2 = _mapKey.currentContext?.findRenderObject();
+        if (ro2 is RenderBox && ro2.hasSize && ro2.size.width > 0 && ro2.size.height > 0) {
+          try {
+            _mapController.move(latlng, zoom);
+          } catch (e) {
+            print('[NavigationUI] Safe move failed: $e');
+          }
+          t.cancel();
+          return;
+        }
+        if (attempts > 20) t.cancel();
+      });
+    });
+  }
+
+  bool _mapHasLayout() {
+    final ctx = _mapKey.currentContext;
+    if (ctx == null) return false;
+    final renderBox = ctx.findRenderObject();
+    if (renderBox is RenderBox) {
+      return renderBox.hasSize && renderBox.size.width > 0 && renderBox.size.height > 0;
     }
+    return false;
   }
 
   void _showLocationMessage(String message) {
@@ -365,7 +488,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
           _currentPosition = newLatLng;
         });
         // Follow the user's position on the map
-        _mapController.move(newLatLng, _mapController.camera.zoom);
+            _safeMapMove(newLatLng, _mapController.camera.zoom);
       });
     } catch (_) {
       // GPS tracking failed silently
@@ -414,7 +537,11 @@ class _RoutingScreenState extends State<RoutingScreen> {
 
     _lastRoutedCctvSnapshot =
         List<Map<String, dynamic>>.from(RoutePlanner.lastCctvSnapshot);
-    if (mounted) setState(() => _cctvDocs = RoutePlanner.lastCctvSnapshot);
+    if (mounted) {
+      setState(() => _cctvDocs = RoutePlanner.lastCctvSnapshot);
+      // Refresh segment geometries (cache HIT expected)
+      _loadRoadSegments(_cctvDocs);
+    }
 
     final previous = _routePlanResult;
     // Only surface an update when the safety picture meaningfully changed.
@@ -576,47 +703,93 @@ class _RoutingScreenState extends State<RoutingScreen> {
 
     final routePolyline = _routePlanResult?.polyline ?? const <LatLng>[];
 
-    return Scaffold(
-      body: Stack(
+    return IgnorePointer(
+      ignoring: !_pointerInteractionsEnabled,
+      child: Scaffold(
+        body: Stack(
         children: [
           // ── FLUTTER MAP ──────────────────────────────────────────────────────
-          FlutterMap(
-            mapController: _mapController,
-            options: MapOptions(
-              initialCenter: _defaultLocation,
-              initialZoom: 15,
+          Positioned.fill(
+            child: LayoutBuilder(
+              builder: (buildCtx, constraints) {
+                final hasLayout = constraints.maxWidth > 0 && constraints.maxHeight > 0;
+                return IgnorePointer(
+                  ignoring: !hasLayout,
+                  child: FlutterMap(
+                    key: _mapKey,
+                    mapController: _mapController,
+                    options: MapOptions(
+                      initialCenter: _defaultLocation,
+                      initialZoom: 15,
+                    ),
+                    children: [
+                      // Tile layer
+                      TileLayer(
+                        urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                        userAgentPackageName: 'com.example.subay',
+                      ),
+                      // Markers layer
+                      MarkerLayer(markers: markers),
+                      // Road segment outlines (from cached OSM geometry)
+                      if (_roadSegments.isNotEmpty) ...[
+                        PolylineLayer(
+                          polylines: [
+                            for (final cctv in _cctvDocs)
+                              if (_roadSegments.containsKey(( _cctvDocs.indexOf(cctv)+1 ).toString()))
+                                Polyline(
+                                  points: _roadSegments[( _cctvDocs.indexOf(cctv)+1 ).toString()]!.points,
+                                  strokeWidth: 8.0,
+                                  color: AppColors.segmentOutline.withValues(alpha: 0.35),
+                                ),
+                          ],
+                        ),
+                        PolylineLayer(
+                          polylines: [
+                            for (final cctv in _cctvDocs)
+                              if (_roadSegments.containsKey(( _cctvDocs.indexOf(cctv)+1 ).toString()))
+                                Polyline(
+                                  points: _roadSegments[( _cctvDocs.indexOf(cctv)+1 ).toString()]!.points,
+                                  strokeWidth: 5.0,
+                                  color: (() {
+                                    final status = (cctv['status'] as String).toLowerCase();
+                                    final water = (cctv['water_level'] as num?)?.toDouble() ?? 0.0;
+                                    // Vehicle-specific impassability: if ALERT and water > vehicle limit, treat as blocked
+                                    if (status == 'danger') return AppColors.danger;
+                                    if (status == 'alert' && water > _selectedVehicleType.maxWaterLevelM) return AppColors.danger;
+                                    if (status == 'alert') return AppColors.alert;
+                                    return AppColors.normal;
+                                  })(),
+                                ),
+                          ],
+                        ),
+                      ],
+                      if (routePolyline.length > 1) ...[
+                        // Dark outline behind the blue line (Google Maps style)
+                        PolylineLayer(
+                          polylines: [
+                            Polyline(
+                              points: routePolyline,
+                              strokeWidth: 8.0,
+                              color: AppColors.routeBlueDark,
+                            ),
+                          ],
+                        ),
+                        // Blue route line on top
+                        PolylineLayer(
+                          polylines: [
+                            Polyline(
+                              points: routePolyline,
+                              strokeWidth: 5.0,
+                              color: AppColors.routeBlue,
+                            ),
+                          ],
+                        ),
+                      ],
+                    ],
+                  ),
+                );
+              },
             ),
-            children: [
-              // Tile layer
-              TileLayer(
-                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                userAgentPackageName: 'com.example.subay',
-              ),
-              // Markers layer
-              MarkerLayer(markers: markers),
-              if (routePolyline.length > 1) ...[
-                // Dark outline behind the blue line (Google Maps style)
-                PolylineLayer(
-                  polylines: [
-                    Polyline(
-                      points: routePolyline,
-                      strokeWidth: 8.0,
-                      color: AppColors.routeBlueDark,
-                    ),
-                  ],
-                ),
-                // Blue route line on top
-                PolylineLayer(
-                  polylines: [
-                    Polyline(
-                      points: routePolyline,
-                      strokeWidth: 5.0,
-                      color: AppColors.routeBlue,
-                    ),
-                  ],
-                ),
-              ],
-            ],
           ),
 
           if (_selectingOrigin || _selectingDestination)
@@ -845,9 +1018,13 @@ class _RoutingScreenState extends State<RoutingScreen> {
                         ],
                       ),
                     ),
-                    const Spacer(),
-                    // End Navigation button
-                    ElevatedButton.icon(
+                    // End Navigation button (constrained to avoid infinite width in Stack)
+                    Expanded(
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 160),
+                          child: ElevatedButton.icon(
                       onPressed: () {
                         setState(() {
                           _navigationStarted = false;
@@ -869,6 +1046,9 @@ class _RoutingScreenState extends State<RoutingScreen> {
                         ),
                         padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
                       ),
+                          ),
+                        ),
+                      ),
                     ),
                   ],
                 ),
@@ -883,7 +1063,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
                 heroTag: 'recenter',
                 onPressed: () {
                   final focusPoint = _originLatLng ?? _defaultLocation;
-                  _mapController.move(focusPoint, 17);
+                  _safeMapMove(focusPoint, 17);
                 },
                 backgroundColor: Colors.white,
                 elevation: 3,
@@ -1193,22 +1373,35 @@ class _RoutingScreenState extends State<RoutingScreen> {
               right: 0,
               child: _RouteBottomSheet(
                 onStartNavigation: () {
-                  setState(() {
-                    _navigationStarted = true;
-                    _routeFound = false;
-                  });
-                  // Focus on user's origin area like Google Maps navigation mode
-                  final focusPoint = _originLatLng ?? _defaultLocation;
-                  _mapController.move(focusPoint, 17);
-                  // Start GPS tracking
-                  _startGpsTracking();
-                },
+                    print('[NavigationUI] Entering navigation mode');
+
+                    // Defer toggling navigation UI until after the next frame
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      if (!mounted) return;
+                      // Now enable navigation UI and hide route sheet
+                      setState(() {
+                        _navigationStarted = true;
+                        _routeFound = false;
+                      });
+                      print('[NavigationUI] Layout ready');
+
+                      // Small deferred delay to ensure the map has been laid out
+                      Future.delayed(const Duration(milliseconds: 50), () {
+                        if (!mounted) return;
+                        print('[NavigationUI] Starting camera/GPS');
+                        final focusPoint = _originLatLng ?? _defaultLocation;
+                        _safeMapMove(focusPoint, 17);
+                        _startGpsTracking();
+                      });
+                    });
+                  },
                 routeResult: _routePlanResult,
               ),
             ),
         ],
       ),
-    );
+    ),
+  );
   }
 }
 

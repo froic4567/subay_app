@@ -174,4 +174,85 @@ class GeoUtils {
 
     return [...backward.reversed, ...forward];
   }
+
+  /// Returns true when two polylines come within [toleranceMeters] of each
+  /// other or their projected segments intersect. Uses an equirectangular
+  /// projection for robust, cheap planar checks at city scale.
+  static bool polylineOverlapsPolyline(
+    List<LatLng> a,
+    List<LatLng> b,
+    double toleranceMeters,
+  ) {
+    if (a.length < 2 || b.length < 2) return false;
+
+    // Quick bbox early-out using lat/lon with small expansion.
+    double aminLat = double.infinity, amaxLat = -double.infinity;
+    double aminLon = double.infinity, amaxLon = -double.infinity;
+    for (final p in a) {
+      aminLat = min(aminLat, p.latitude);
+      amaxLat = max(amaxLat, p.latitude);
+      aminLon = min(aminLon, p.longitude);
+      amaxLon = max(amaxLon, p.longitude);
+    }
+    double bminLat = double.infinity, bmaxLat = -double.infinity;
+    double bminLon = double.infinity, bmaxLon = -double.infinity;
+    for (final p in b) {
+      bminLat = min(bminLat, p.latitude);
+      bmaxLat = max(bmaxLat, p.latitude);
+      bminLon = min(bminLon, p.longitude);
+      bmaxLon = max(bmaxLon, p.longitude);
+    }
+    // Convert tolerance to degrees roughly for early bbox check.
+    final tolDeg = toleranceMeters / 111320.0;
+    if (amaxLat + tolDeg < bminLat || bmaxLat + tolDeg < aminLat) return false;
+    if (amaxLon + tolDeg < bminLon || bmaxLon + tolDeg < aminLon) return false;
+
+    // Project coordinates using local latitude scale for more accurate XY checks.
+    double latRad = ((aminLat + amaxLat + bminLat + bmaxLat) / 4.0) * pi / 180.0;
+    final lngScale = cos(latRad);
+
+    bool segsIntersectProjected(LatLng a1, LatLng a2, LatLng b1, LatLng b2) {
+      final ax1 = a1.longitude * lngScale;
+      final ay1 = a1.latitude;
+      final ax2 = a2.longitude * lngScale;
+      final ay2 = a2.latitude;
+      final bx1 = b1.longitude * lngScale;
+      final by1 = b1.latitude;
+      final bx2 = b2.longitude * lngScale;
+      final by2 = b2.latitude;
+
+      double orient(double x1, double y1, double x2, double y2, double x3, double y3) {
+        return (x2 - x1) * (y3 - y1) - (y2 - y1) * (x3 - x1);
+      }
+
+      final o1 = orient(ax1, ay1, ax2, ay2, bx1, by1);
+      final o2 = orient(ax1, ay1, ax2, ay2, bx2, by2);
+      final o3 = orient(bx1, by1, bx2, by2, ax1, ay1);
+      final o4 = orient(bx1, by1, bx2, by2, ax2, ay2);
+
+      if (o1 == 0 && o2 == 0 && o3 == 0 && o4 == 0) {
+        // Colinear - fallback to distance checks
+        return false;
+      }
+
+      return (o1 * o2 < 0) && (o3 * o4 < 0);
+    }
+
+    for (var i = 0; i < a.length - 1; i++) {
+      for (var j = 0; j < b.length - 1; j++) {
+        // If projected segments intersect, they overlap
+        if (segsIntersectProjected(a[i], a[i + 1], b[j], b[j + 1])) return true;
+        // Otherwise check endpoint-to-segment distances
+        final d1 = nearestPointOnSegment(a[i], b[j], b[j + 1]).distanceM;
+        if (d1 <= toleranceMeters) return true;
+        final d2 = nearestPointOnSegment(a[i + 1], b[j], b[j + 1]).distanceM;
+        if (d2 <= toleranceMeters) return true;
+        final d3 = nearestPointOnSegment(b[j], a[i], a[i + 1]).distanceM;
+        if (d3 <= toleranceMeters) return true;
+        final d4 = nearestPointOnSegment(b[j + 1], a[i], a[i + 1]).distanceM;
+        if (d4 <= toleranceMeters) return true;
+      }
+    }
+    return false;
+  }
 }

@@ -6,6 +6,7 @@ import 'package:latlong2/latlong.dart';
 import 'cctv_service.dart';
 import 'geo_utils.dart';
 import 'routing_test_logger.dart';
+import 'road_segment_service.dart';
 
 /// Optional context for route requests triggered by flood-status changes.
 class RouteRequestContext {
@@ -251,6 +252,78 @@ class _MinHeap {
   }
 }
 
+/// Lexicographic cost used for safety-first routing: (safetyLevel, timeSec, distanceM)
+class _Cost implements Comparable<_Cost> {
+  final int safetyLevel; // 0 = NORMAL-only, 1 = contains ALERT
+  final double timeSec; // cumulative travel time in seconds
+  final double distanceM; // cumulative raw distance in meters (unpenalized)
+
+  const _Cost(this.safetyLevel, this.timeSec, this.distanceM);
+
+  static const _infty = _Cost(999999, double.infinity, double.infinity);
+
+  @override
+  int compareTo(_Cost other) {
+    if (safetyLevel != other.safetyLevel) return safetyLevel - other.safetyLevel;
+    if (timeSec != other.timeSec) return timeSec < other.timeSec ? -1 : 1;
+    if (distanceM != other.distanceM) return distanceM < other.distanceM ? -1 : 1;
+    return 0;
+  }
+}
+
+/// Min-heap keyed by [_Cost] for lexicographic ordering.
+class _MinHeapCost {
+  final List<_Cost> _cost = <_Cost>[];
+  final List<int> _node = <int>[];
+
+  bool get isEmpty => _node.isEmpty;
+
+  void add(_Cost cost, int node) {
+    _cost.add(cost);
+    _node.add(node);
+    var i = _node.length - 1;
+    while (i > 0) {
+      final parent = (i - 1) >> 1;
+      if (_cost[parent].compareTo(_cost[i]) <= 0) break;
+      _swap(i, parent);
+      i = parent;
+    }
+  }
+
+  ( _Cost, int ) removeMin() {
+    final resultCost = _cost[0];
+    final resultNode = _node[0];
+    final last = _node.length - 1;
+    _cost[0] = _cost[last];
+    _node[0] = _node[last];
+    _cost.removeLast();
+    _node.removeLast();
+
+    var i = 0;
+    final len = _node.length;
+    while (true) {
+      final l = 2 * i + 1;
+      final r = 2 * i + 2;
+      var smallest = i;
+      if (l < len && _cost[l].compareTo(_cost[smallest]) < 0) smallest = l;
+      if (r < len && _cost[r].compareTo(_cost[smallest]) < 0) smallest = r;
+      if (smallest == i) break;
+      _swap(i, smallest);
+      i = smallest;
+    }
+    return (resultCost, resultNode);
+  }
+
+  void _swap(int a, int b) {
+    final tc = _cost[a];
+    _cost[a] = _cost[b];
+    _cost[b] = tc;
+    final tn = _node[a];
+    _node[a] = _node[b];
+    _node[b] = tn;
+  }
+}
+
 /// ---------------------------------------------------------------------------
 /// Flood-aware, vehicle-aware router using true Dijkstra's algorithm.
 ///
@@ -363,19 +436,86 @@ class RoutePlanner {
         destination: destination,
         dangers: dangersOnRoute,
       );
-      routes.addAll(detours);
+      // Only include detours that do not still intersect the impassable
+      // danger nodes we are trying to avoid.
+      for (final d in detours) {
+        final stillNear = _dangersNearCandidates([d], avoidableNodes, 120.0);
+        if (stillNear.isEmpty) routes.add(d);
+      }
     }
     osrmStopwatch.stop();
     osrmFetchTime = osrmStopwatch.elapsed;
 
-    // 3–5. Build one merged graph from all candidates.
+    // 3–5. Build one merged graph from all candidates. Attempt to fetch
+    // RoadSegment geometry for hazards so vertex-hazard checks can use the
+    // actual road polyline where available; fall back to point-distance if
+    // Overpass/segment lookup fails or is missing.
     final graphStopwatch = Stopwatch()..start();
+    final Map<String, RoadSegmentResult?> segmentsById = {};
+    try {
+      // Batch fetch segments for all hazard nodes in one Overpass bbox
+      // query to reuse cached geometry and avoid many individual requests.
+      final idToCoord = {
+        for (final n in hazardNodes) n.id: n.location,
+      };
+      final fetched = await RoadSegmentService.getSegmentsForCoordinates(idToCoord);
+      for (final n in hazardNodes) {
+        segmentsById[n.id] = fetched[n.id];
+      }
+    } catch (e) {
+      print('⚠️ [RoutePlanner] Road segment lookups failed: $e');
+      print('[RoadSegmentCache] TIMEOUT or geometry fetch failure');
+      // Conservative behavior: if any hazard is DANGER or an ALERT that
+      // is currently impassable for this vehicle, we cannot verify safety
+      // and must refuse to return a potentially unsafe route.
+      final critical = hazardNodes.where((h) =>
+          h.status.toUpperCase() == 'DANGER' ||
+          (h.status.toUpperCase() == 'ALERT' && !h.isPassableFor(vehicleType))).toList();
+      if (critical.isNotEmpty) {
+        for (final c in critical) {
+          print('[RoadSegmentCache] Geometry unavailable for critical CCTV ${c.id} status=${c.status}');
+        }
+        // Build simple origin/destination placeholders for the result.
+        final originNode = RouteNode(
+          id: 'origin',
+          name: 'Origin',
+          roadName: 'Your location',
+          location: origin,
+          status: 'SAFE',
+          waterLevelM: 0.0,
+          connectedIds: const [],
+        );
+        final destinationNode = RouteNode(
+          id: 'destination',
+          name: 'Destination',
+          roadName: 'Selected destination',
+          location: destination,
+          status: 'SAFE',
+          waterLevelM: 0.0,
+          connectedIds: const [],
+        );
+        return RoutePlanResult(
+          path: [originNode, destinationNode],
+          distanceKm: 0.0,
+          durationMinutes: 0.0,
+          avoidedNodes: avoidableNodes,
+          polyline: const [],
+          summary: 'Unable to verify safe route',
+          isFullySafe: false,
+          warningMessage:
+              'Unable to verify safe route because road geometry could not be fetched. Please try again later.',
+        );
+      }
+      // Otherwise continue using whatever cache is available and fallbacks.
+    }
+
     final graph = _buildGraph(
       routes: routes,
       origin: origin,
       destination: destination,
       hazardNodes: hazardNodes,
       vehicleType: vehicleType,
+      segmentsById: segmentsById,
     );
     graphStopwatch.stop();
     graphConstructionTime = graphStopwatch.elapsed;
@@ -461,9 +601,67 @@ class RoutePlanner {
             'No fully safe route found for your vehicle. Showing the best available route — flooded areas may be present. Proceed with extreme caution.',
       );
     }
-
     // 7b. Assemble the winning polyline and derived metrics.
     final routePoints = dijkstra.path.map((i) => nodes[i]).toList();
+
+    // Final validation: ensure resulting route does NOT intersect any
+    // blocked OSM segment for the selected vehicle (defensive check).
+    final valid = _validateRouteAgainstBlockedSegments(routePoints, segmentsById, hazardNodes, vehicleType);
+    if (!valid) {
+      print('[RouteValidation] Selected route intersects blocked OSM segment — rejecting');
+      // Treat as no valid path so we use fallback behavior.
+      pathGenStopwatch.stop();
+      // Log and return as unsafe fallback
+      _emitRoutingLog(
+        origin: origin,
+        destination: destination,
+        context: context,
+        pathGenerationLatency: pathGenStopwatch.elapsed,
+        graphConstructionTime: graphConstructionTime,
+        dbFetchTime: dbFetchTime,
+        osrmFetchTime: osrmFetchTime,
+        dijkstraTime: dijkstraTime,
+        cctvDocs: cctvDocs,
+        hazardNodes: hazardNodes,
+        dangerNodes: dangerNodes,
+        routes: routes,
+        vehicleType: vehicleType,
+        routeFound: false,
+        adj: adj,
+        src: src,
+        dst: dst,
+      );
+
+      return RoutePlanResult(
+        path: [
+          RouteNode(
+            id: 'origin',
+            name: 'Origin',
+            roadName: 'Your location',
+            location: origin,
+            status: 'SAFE',
+            waterLevelM: 0.0,
+            connectedIds: const [],
+          ),
+          RouteNode(
+            id: 'destination',
+            name: 'Destination',
+            roadName: 'Selected destination',
+            location: destination,
+            status: 'SAFE',
+            waterLevelM: 0.0,
+            connectedIds: const [],
+          ),
+        ],
+        distanceKm: 0.0,
+        durationMinutes: 0.0,
+        avoidedNodes: avoidableNodes,
+        polyline: const [],
+        summary: 'No safe route available',
+        isFullySafe: false,
+        warningMessage: 'No safe route is available for this vehicle.',
+      );
+    }
     final chosenDistanceM = _sumMeters(routePoints);
 
     // Estimate duration using the primary candidate's average speed.
@@ -528,6 +726,7 @@ class RoutePlanner {
     required LatLng destination,
     required List<RouteNode> hazardNodes,
     required VehicleType vehicleType,
+    Map<String, RoadSegmentResult?>? segmentsById,
   }) {
     final nodes = <LatLng>[];
     final adj = <List<_Edge>>[];
@@ -556,7 +755,7 @@ class RoutePlanner {
 
     for (var r = 0; r < routes.length; r++) {
       final densified = GeoUtils.densify(routes[r].points, _maxEdgeLengthM);
-      final vertexHazards = _computeVertexHazards(densified, hazardNodes);
+      final vertexHazards = _computeVertexHazards(densified, hazardNodes, segmentsById);
       final idxs = List<int>.generate(
         densified.length,
         (k) => addNode(densified[k], r, vertexHazards[k]),
@@ -570,6 +769,8 @@ class RoutePlanner {
           vertexHazards[i],
           vertexHazards[i + 1],
           vehicleType,
+          segmentsById,
+          hazardNodes,
         );
         if (sw.weight.isFinite) {
           link(idxs[i], idxs[i + 1], sw.weight, sw.isAlert);
@@ -577,17 +778,53 @@ class RoutePlanner {
       }
     }
 
-    _addCrossLinks(nodes, nodeRoute, nodeHazard, vehicleType, link);
+    _addCrossLinks(nodes, nodeRoute, nodeHazard, vehicleType, link, hazardNodes, segmentsById);
 
     final src = addNode(origin, -1, null);
     final dst = addNode(destination, -1, null);
     for (final s in startIdx) {
-      final sw = _segmentWeight(origin, nodes[s], hazardNodes, vehicleType);
+      final sw = _segmentWeight(origin, nodes[s], hazardNodes, vehicleType, segmentsById);
       if (sw.weight.isFinite) link(src, s, sw.weight, sw.isAlert);
     }
     for (final e in endIdx) {
-      final sw = _segmentWeight(nodes[e], destination, hazardNodes, vehicleType);
+      final sw = _segmentWeight(nodes[e], destination, hazardNodes, vehicleType, segmentsById);
       if (sw.weight.isFinite) link(dst, e, sw.weight, sw.isAlert);
+    }
+
+    // Enforce blocking and penalties based on full OSM segments. Any edge
+    // overlapping a blocked OSM segment becomes impassable (infinite).
+    const overlapTol = 8.0; // meters tolerance for geometric overlap
+    for (var u = 0; u < adj.length; u++) {
+      final a = nodes[u];
+      for (var k = 0; k < adj[u].length; k++) {
+        final e = adj[u][k];
+        final b = nodes[e.to];
+        // Skip already-infinite edges
+        if (!e.weight.isFinite) continue;
+        var replaced = false;
+        for (final hazard in hazardNodes) {
+          final seg = segmentsById != null ? segmentsById[hazard.id] : null;
+          if (seg == null || seg.points.length < 2) continue;
+          final overlaps = GeoUtils.polylineOverlapsPolyline([a, b], seg.points, overlapTol);
+          if (!overlaps) continue;
+          // If hazard blocks this vehicle, make infinite
+          if (!hazard.isPassableFor(vehicleType) || hazard.status.toUpperCase() == 'DANGER') {
+            adj[u][k] = _Edge(e.to, double.infinity, e.isAlert);
+            replaced = true;
+            print('[RouteSafety] Edge $u->${e.to} BLOCKED by ${hazard.id} (way=${seg.wayId})');
+            break;
+          }
+          // Otherwise an ALERT applies: penalize
+          if (hazard.status.toUpperCase() == 'ALERT') {
+            final base = _haversine(a, b);
+            adj[u][k] = _Edge(e.to, base * _alertPenalty, true);
+            replaced = true;
+            print('[RouteSafety] Edge $u->${e.to} penalized (ALERT ${hazard.id})');
+            break;
+          }
+        }
+        if (replaced) continue;
+      }
     }
 
     return _GraphBuildResult(nodes: nodes, adj: adj, src: src, dst: dst);
@@ -767,7 +1004,7 @@ class RoutePlanner {
 
     final fullSw = Stopwatch()..start();
     for (final (a, b) in segments) {
-      _segmentWeight(a, b, hazardNodes, vehicleType);
+      _segmentWeight(a, b, hazardNodes, vehicleType, null);
     }
     fullSw.stop();
 
@@ -785,6 +1022,33 @@ class RoutePlanner {
       }
     }
     return false;
+  }
+
+  /// Validates that [routePoints] do not intersect any blocked OSM segment
+  /// (DANGER or vehicle-impassable ALERT) from [hazardNodes]/[segmentsById].
+  static bool _validateRouteAgainstBlockedSegments(
+    List<LatLng> routePoints,
+    Map<String, RoadSegmentResult?>? segmentsById,
+    List<RouteNode> hazardNodes,
+    VehicleType vehicle,
+  ) {
+    if (routePoints.length < 2) return true;
+    const overlapTol = 8.0;
+    for (var i = 0; i < routePoints.length - 1; i++) {
+      final edge = [routePoints[i], routePoints[i + 1]];
+      for (final hazard in hazardNodes) {
+        final seg = segmentsById != null ? segmentsById[hazard.id] : null;
+        if (seg == null || seg.points.length < 2) continue;
+        final overlaps = GeoUtils.polylineOverlapsPolyline(edge, seg.points, overlapTol);
+        if (!overlaps) continue;
+        // If hazard is DANGER or not passable for this vehicle, route invalid
+        if (hazard.status.toUpperCase() == 'DANGER' || !hazard.isPassableFor(vehicle)) {
+          print('[RouteValidation] Route edge ${i} intersects blocked segment ${hazard.id}');
+          return false;
+        }
+      }
+    }
+    return true;
   }
 
   /// Confirms the rerouted path avoids segments that just became impassable.
@@ -822,6 +1086,8 @@ class RoutePlanner {
     List<RouteNode?> nodeHazard,
     VehicleType vehicle,
     void Function(int a, int b, double w, bool alert) link,
+    List<RouteNode> hazardNodes,
+    Map<String, RoadSegmentResult?>? segmentsById,
   ) {
     final cellDeg = _crossLinkRadiusM / 111320.0; // meters → degrees (approx)
     final grid = <String, List<int>>{};
@@ -866,6 +1132,8 @@ class RoutePlanner {
               nodeHazard[i],
               nodeHazard[j],
               vehicle,
+              segmentsById,
+              hazardNodes,
             );
             if (sw.weight.isFinite) link(i, j, sw.weight, sw.isAlert);
           }
@@ -893,6 +1161,7 @@ class RoutePlanner {
   static List<RouteNode?> _computeVertexHazards(
     List<LatLng> densified,
     List<RouteNode> hazardNodes,
+    Map<String, RoadSegmentResult?>? segmentsById,
   ) {
     final result = List<RouteNode?>.filled(densified.length, null);
     if (densified.isEmpty) return result;
@@ -906,6 +1175,30 @@ class RoutePlanner {
     }
 
     for (final hazard in hazardNodes) {
+      // Prefer to classify vertices by overlap with the cached OSM segment
+      // when available. This marks every densified vertex whose distance to
+      // the OSM polyline is within the detection radius. Only if no such
+      // overlap is found do we fall back to nearest-vertex + propagation.
+      final seg = segmentsById != null ? segmentsById[hazard.id] : null;
+      var markedFromSeg = false;
+      if (seg != null && seg.points.length >= 2) {
+        for (var i = 0; i < densified.length; i++) {
+          final proj = GeoUtils.nearestPointOnPolyline(densified[i], seg.points);
+          final d = proj?.distanceM ?? double.infinity;
+          if (d <= _detectRadiusM) {
+            mark(i, hazard);
+            markedFromSeg = true;
+          }
+        }
+        if (markedFromSeg) {
+          print('ℹ️ [RoutePlanner] Using cached OSM segment for ${hazard.id} to mark ${densified.length} vertices');
+          continue; // done with this hazard
+        }
+      }
+
+      // No segment-overlap found — fall back to nearest-vertex + arc-length
+      // propagation (this is the legacy behavior and is used only as a
+      // fallback when OSM topology/geometry is unavailable).
       var nearestIdx = 0;
       var nearestDist = double.infinity;
       for (var i = 0; i < densified.length; i++) {
@@ -947,20 +1240,45 @@ class RoutePlanner {
     RouteNode? hazardA,
     RouteNode? hazardB,
     VehicleType vehicle,
+    Map<String, RoadSegmentResult?>? segmentsById,
+    List<RouteNode> hazardNodes,
   ) {
     final base = _haversine(a, b);
+
+    // First: check full OSM segment overlaps against all hazards when
+    // available. If an OSRM edge geometry overlaps a DANGER or vehicle-
+    // impassable ALERT segment, it must be blocked.
+    const overlapTol = 8.0; // meters
+    for (final hazard in hazardNodes) {
+      final seg = segmentsById != null ? segmentsById[hazard.id] : null;
+      if (seg == null || seg.points.length < 2) continue;
+      final overlaps = GeoUtils.polylineOverlapsPolyline([a, b], seg.points, overlapTol);
+      if (!overlaps) continue;
+      // Overlaps a known OSM segment for this hazard.
+      if (!hazard.isPassableFor(vehicle) || hazard.status.toUpperCase() == 'DANGER') {
+        print('[RouteSafety] OSRM edge overlaps BLOCKED OSM segment ${hazard.id} (way=${seg.wayId})');
+        return const _SegWeight(double.infinity, false);
+      }
+      if (hazard.status.toUpperCase() == 'ALERT') {
+        print('[RouteSafety] OSRM edge overlaps ALERT OSM segment ${hazard.id} — applying penalty');
+        return _SegWeight(base * _alertPenalty, true);
+      }
+    }
+
+    // No overlapping OSM segment found — fall back to vertex-based hazard
+    // mapping previously used.
     RouteNode? worst;
     if (hazardA != null && hazardB != null) {
-      worst = _hazardSeverity(hazardA) >= _hazardSeverity(hazardB)
-          ? hazardA
-          : hazardB;
+      worst = _hazardSeverity(hazardA) >= _hazardSeverity(hazardB) ? hazardA : hazardB;
     } else {
       worst = hazardA ?? hazardB;
     }
     if (worst == null) return _SegWeight(base, false);
     if (!worst.isPassableFor(vehicle)) {
+      print('⚠️ [RoutePlanner] DANGER/ALERT segment BLOCKED: ${worst.id} vehicle=${vehicle.label} water=${worst.waterLevelM}');
       return const _SegWeight(double.infinity, false);
     }
+    print('⚠️ [RoutePlanner] ALERT segment ALLOWED with penalty: ${worst.id} water=${worst.waterLevelM} vehicle=${vehicle.label}');
     return _SegWeight(base * _alertPenalty, true);
   }
 
@@ -971,15 +1289,39 @@ class RoutePlanner {
     LatLng b,
     List<RouteNode> hazards,
     VehicleType vehicle,
+    Map<String, RoadSegmentResult?>? segmentsById,
   ) {
     final base = _haversine(a, b);
     var weight = base;
     var isAlert = false;
+
+    // First check full OSM segment overlaps when available.
+    const overlapTol = 8.0;
+    for (final n in hazards) {
+      final seg = segmentsById != null ? segmentsById[n.id] : null;
+      if (seg != null && seg.points.length >= 2) {
+        final overlaps = GeoUtils.polylineOverlapsPolyline([a, b], seg.points, overlapTol);
+        if (overlaps) {
+          if (!n.isPassableFor(vehicle) || n.status.toUpperCase() == 'DANGER') {
+            print('[RouteSafety] _segmentWeight BLOCKED by ${n.id} (way=${seg.wayId})');
+            return const _SegWeight(double.infinity, false);
+          }
+          if (n.status.toUpperCase() == 'ALERT') {
+            weight = base * _alertPenalty;
+            isAlert = true;
+            print('[RouteSafety] _segmentWeight ALERT penalty by ${n.id}');
+          }
+          // If we've handled this segment, continue to next hazard
+          continue;
+        }
+      }
+    }
+
+    // Fallback to midpoint radius check when OSM geometry unavailable.
     final mid = LatLng(
       (a.latitude + b.latitude) / 2,
       (a.longitude + b.longitude) / 2,
     );
-
     for (final n in hazards) {
       final d = [
         _haversine(a, n.location),
@@ -989,11 +1331,13 @@ class RoutePlanner {
 
       if (d <= _detectRadiusM) {
         if (!n.isPassableFor(vehicle)) {
+          print('⚠️ [RoutePlanner] _segmentWeight BLOCKED by ${n.id} water=${n.waterLevelM} vehicle=${vehicle.label}');
           return const _SegWeight(double.infinity, false);
         }
         if (n.status.toUpperCase() == 'ALERT') {
           weight = base * _alertPenalty;
           isAlert = true;
+          print('⚠️ [RoutePlanner] _segmentWeight ALERT penalty by ${n.id} water=${n.waterLevelM} vehicle=${vehicle.label}');
         }
       }
     }
@@ -1003,32 +1347,43 @@ class RoutePlanner {
   /// Classic Dijkstra shortest path with alert-flag propagation.
   static _DijkstraResult? _dijkstra(List<List<_Edge>> adj, int src, int dst) {
     final n = adj.length;
-    final dist = List<double>.filled(n, double.infinity);
     final prev = List<int>.filled(n, -1);
-    final alertOnPath = List<bool>.filled(n, false);
-    dist[src] = 0;
+    final dist = List<_Cost>.filled(n, _Cost._infty);
+    // initial node: safety 0, time 0, distance 0
+    dist[src] = const _Cost(0, 0.0, 0.0);
 
-    final heap = _MinHeap();
-    heap.add(0.0, src);
+    final heap = _MinHeapCost();
+    heap.add(dist[src], src);
+
+    // assumed travel speed (m/s) for converting distance to time
+    const double speedMps = 8.33; // ~30 km/h fallback
 
     while (!heap.isEmpty) {
       final (cost, u) = heap.removeMin();
-      if (cost > dist[u]) continue;
+      // skip stale heap entries
+      if (cost.compareTo(dist[u]) != 0) continue;
       if (u == dst) break;
 
       for (final e in adj[u]) {
         if (!e.weight.isFinite) continue;
-        final newCost = dist[u] + e.weight;
-        if (newCost < dist[e.to]) {
+        // e.weight is potentially already penalized (alert multiplier applied)
+        final edgePenalizedDistance = e.weight;
+        final edgeBaseDistance = e.isAlert ? (e.weight / _alertPenalty) : e.weight;
+        final edgeTimeSec = edgePenalizedDistance / speedMps;
+        final newSafety = dist[u].safetyLevel == 1 || e.isAlert ? 1 : 0;
+        final newTime = dist[u].timeSec + edgeTimeSec;
+        final newDist = dist[u].distanceM + edgeBaseDistance;
+
+        final newCost = _Cost(newSafety, newTime, newDist);
+        if (newCost.compareTo(dist[e.to]) < 0) {
           dist[e.to] = newCost;
           prev[e.to] = u;
-          alertOnPath[e.to] = alertOnPath[u] || e.isAlert;
           heap.add(newCost, e.to);
         }
       }
     }
 
-    if (dist[dst] == double.infinity) return null;
+    if (dist[dst].timeSec == double.infinity) return null;
 
     final path = <int>[];
     var current = dst;
@@ -1036,7 +1391,9 @@ class RoutePlanner {
       path.insert(0, current);
       current = prev[current];
     }
-    return _DijkstraResult(path, dist[dst], alertOnPath[dst]);
+    final hasAlert = dist[dst].safetyLevel == 1;
+    // Return travel-time (seconds) as cost for compatibility with logs.
+    return _DijkstraResult(path, dist[dst].timeSec, hasAlert);
   }
 
   /// Fetches OSRM candidate routes (primary + alternatives) as geometry lists.
