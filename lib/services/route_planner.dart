@@ -324,6 +324,15 @@ class _MinHeapCost {
   }
 }
 
+/// Exception thrown when critical OSM geometry required for safety checks
+/// is missing and the route cannot be verified.
+class _UnableToVerifySafeRoute implements Exception {
+  final String message;
+  _UnableToVerifySafeRoute(this.message);
+  @override
+  String toString() => 'UnableToVerifySafeRoute: $message';
+}
+
 /// ---------------------------------------------------------------------------
 /// Flood-aware, vehicle-aware router using true Dijkstra's algorithm.
 ///
@@ -340,7 +349,20 @@ class RoutePlanner {
 
   /// A flood point within this many meters of a segment influences that
   /// segment's cost (or blocks it entirely).
-  static const double _detectRadiusM = 80.0;
+  ///
+  /// This MUST be the same radius (or wider) than whatever radius is used
+  /// to decide "is a candidate route near this hazard at all" (see
+  /// _dangersNearCandidates calls in planRoute()). Previously those calls
+  /// used a hardcoded 120.0 while this constant was 80.0 — any hazard
+  /// between 80m and 120m of a route got flagged as "candidate routes pass
+  /// near hazard" (triggering a detour attempt) but was NEVER actually
+  /// marked on a graph vertex or blocked, because every vertex-marking and
+  /// blocking check in this file gates on _detectRadiusM. If the detour
+  /// attempt for that hazard cluster then failed to clear it, Dijkstra was
+  /// completely blind to that hazard and could route straight past it.
+  /// Keeping a single named constant, referenced everywhere a hazard
+  /// "closeness" decision is made, prevents this class of gap.
+  static const double _detectRadiusM = 120.0;
 
   /// Points from different OSRM alternatives closer than this are linked so
   /// Dijkstra can switch between candidate roads at crossover points.
@@ -429,19 +451,19 @@ class RoutePlanner {
     //     choke point on straight roads, so without this Dijkstra would have no
     //     genuinely safe candidate to choose.
     final dangersOnRoute =
-        _dangersNearCandidates(routes, avoidableNodes, 120.0);
+        _dangersNearCandidates(routes, avoidableNodes, _detectRadiusM);
     if (dangersOnRoute.isNotEmpty) {
       final detours = await _fetchDetourRoutes(
         origin: origin,
         destination: destination,
         dangers: dangersOnRoute,
+        avoidableNodes: avoidableNodes,
       );
-      // Only include detours that do not still intersect the impassable
-      // danger nodes we are trying to avoid.
-      for (final d in detours) {
-        final stillNear = _dangersNearCandidates([d], avoidableNodes, 120.0);
-        if (stillNear.isEmpty) routes.add(d);
-      }
+      // _fetchDetourRoutes already validates each candidate against
+      // avoidableNodes internally (needed so it can stop escalating once a
+      // clean detour is found), so every route returned here is confirmed
+      // hazard-free — just add them all as Dijkstra candidates.
+      routes.addAll(detours);
     }
     osrmStopwatch.stop();
     osrmFetchTime = osrmStopwatch.elapsed;
@@ -509,6 +531,32 @@ class RoutePlanner {
       // Otherwise continue using whatever cache is available and fallbacks.
     }
 
+    // 2c. Ask Valhalla's public routing service for a route that is
+    //     computed directly against the real road network while explicitly
+    //     excluding every currently-blocked road. This is fundamentally
+    //     different from (and complements) the OSRM candidates/detours
+    //     above: those can only nudge an existing route sideways within a
+    //     limited search cone (a fixed perpendicular offset, capped
+    //     distance), so a genuine alternate bridge/crossing outside that
+    //     cone can be permanently invisible to them no matter how far the
+    //     destination is. Valhalla's exclude_polygons makes the routing
+    //     engine itself avoid these roads while searching the FULL graph,
+    //     so it can find a real detour regardless of direction or distance.
+    //     If this fails or times out, that's fine — it's treated as "this
+    //     extra candidate wasn't available," and the OSRM candidates/
+    //     detours computed above still run independently either way.
+    if (avoidableNodes.isNotEmpty) {
+      final valhallaRoute = await _fetchValhallaAvoidRoute(
+        origin: origin,
+        destination: destination,
+        avoidableNodes: avoidableNodes,
+        segmentsById: segmentsById,
+      );
+      if (valhallaRoute != null) {
+        routes.add(valhallaRoute);
+      }
+    }
+
     final graph = _buildGraph(
       routes: routes,
       origin: origin,
@@ -550,68 +598,19 @@ class RoutePlanner {
       connectedIds: const [],
     );
 
-    // 7a. No fully-safe path survives the flood blocks. Rather than fail
-    //     silently, fall back to the primary OSRM route so the user still sees
-    //     a line, but flag it clearly as not safe.
+    // 7a. No fully-safe path survives the flood blocks. Do NOT fall back to
+    //     the raw OSRM route here — that route is guaranteed to cross at
+    //     least one DANGER/blocked segment (that's exactly why Dijkstra
+    //     couldn't find a path), and a rendered polyline looks the same to
+    //     a driver whether it's marked safe or not. Return no route at all,
+    //     matching the same empty-polyline "no safe route" shape used by
+    //     the other refusal branches in this function (see the
+    //     _UnableToVerifySafeRoute catch block and the post-Dijkstra
+    //     validation-failure branch below), so the caller/UI has nothing
+    //     drivable-looking to draw and must show the refusal explicitly.
     if (dijkstra == null) {
-      final fallback = routes.first.points;
-      final fbDistM = _sumMeters(fallback);
-      final fbSpeed = routes.first.durationSeconds > 0
-          ? routes.first.distanceMeters / routes.first.durationSeconds
-          : 8.33;
-      final fbKm = fbDistM / 1000.0;
-      final fbMin = (fbSpeed > 0 ? fbDistM / fbSpeed : 0.0) / 60.0;
       pathGenStopwatch.stop();
 
-      _emitRoutingLog(
-        origin: origin,
-        destination: destination,
-        context: context,
-        pathGenerationLatency: pathGenStopwatch.elapsed,
-        graphConstructionTime: graphConstructionTime,
-        dbFetchTime: dbFetchTime,
-        osrmFetchTime: osrmFetchTime,
-        dijkstraTime: dijkstraTime,
-        cctvDocs: cctvDocs,
-        hazardNodes: hazardNodes,
-        dangerNodes: dangerNodes,
-        routes: routes,
-        vehicleType: vehicleType,
-        routeFound: true,
-        adj: adj,
-        src: src,
-        dst: dst,
-        dijkstraPath: const [],
-        routePoints: fallback,
-        distanceKm: fbKm,
-        durationMinutes: fbMin,
-        chosenHasAlert: true,
-      );
-
-      return RoutePlanResult(
-        path: [originNode, destinationNode],
-        distanceKm: fbKm,
-        durationMinutes: fbMin,
-        avoidedNodes: avoidableNodes,
-        polyline: fallback,
-        summary:
-            '${fbKm.toStringAsFixed(1)} km · ${RoutePlanResult.formatEta(fbMin)}',
-        isFullySafe: false,
-        warningMessage:
-            'No fully safe route found for your vehicle. Showing the best available route — flooded areas may be present. Proceed with extreme caution.',
-      );
-    }
-    // 7b. Assemble the winning polyline and derived metrics.
-    final routePoints = dijkstra.path.map((i) => nodes[i]).toList();
-
-    // Final validation: ensure resulting route does NOT intersect any
-    // blocked OSM segment for the selected vehicle (defensive check).
-    final valid = _validateRouteAgainstBlockedSegments(routePoints, segmentsById, hazardNodes, vehicleType);
-    if (!valid) {
-      print('[RouteValidation] Selected route intersects blocked OSM segment — rejecting');
-      // Treat as no valid path so we use fallback behavior.
-      pathGenStopwatch.stop();
-      // Log and return as unsafe fallback
       _emitRoutingLog(
         origin: origin,
         destination: destination,
@@ -630,8 +629,92 @@ class RoutePlanner {
         adj: adj,
         src: src,
         dst: dst,
+        dijkstraPath: const [],
+        routePoints: const [],
+        distanceKm: 0.0,
+        durationMinutes: 0.0,
+        chosenHasAlert: false,
       );
 
+      return RoutePlanResult(
+        path: [originNode, destinationNode],
+        distanceKm: 0.0,
+        durationMinutes: 0.0,
+        avoidedNodes: avoidableNodes,
+        polyline: const [],
+        summary: 'No safe route available',
+        isFullySafe: false,
+        warningMessage:
+            'No safe route could be found for your vehicle — every nearby road passes through a flooded or blocked area. Please wait for conditions to improve or choose a different destination.',
+      );
+    }
+    // 7b. Assemble the winning polyline and derived metrics.
+    final routePoints = dijkstra.path.map((i) => nodes[i]).toList();
+
+    // Final validation: ensure resulting route does NOT intersect any
+    // blocked OSM segment for the selected vehicle (defensive check).
+    // Final validation: ensure resulting route does NOT intersect any
+    // blocked OSM segment for the selected vehicle (defensive check).
+    try {
+      final valid = _validateRouteAgainstBlockedSegments(routePoints, segmentsById, hazardNodes, vehicleType);
+      if (!valid) {
+        print('[RouteValidation] Selected route intersects blocked OSM segment — rejecting');
+        // Treat as no valid path so we use fallback behavior.
+        pathGenStopwatch.stop();
+        // Log and return as unsafe fallback
+        _emitRoutingLog(
+          origin: origin,
+          destination: destination,
+          context: context,
+          pathGenerationLatency: pathGenStopwatch.elapsed,
+          graphConstructionTime: graphConstructionTime,
+          dbFetchTime: dbFetchTime,
+          osrmFetchTime: osrmFetchTime,
+          dijkstraTime: dijkstraTime,
+          cctvDocs: cctvDocs,
+          hazardNodes: hazardNodes,
+          dangerNodes: dangerNodes,
+          routes: routes,
+          vehicleType: vehicleType,
+          routeFound: false,
+          adj: adj,
+          src: src,
+          dst: dst,
+        );
+
+        return RoutePlanResult(
+          path: [
+            RouteNode(
+              id: 'origin',
+              name: 'Origin',
+              roadName: 'Your location',
+              location: origin,
+              status: 'SAFE',
+              waterLevelM: 0.0,
+              connectedIds: const [],
+            ),
+            RouteNode(
+              id: 'destination',
+              name: 'Destination',
+              roadName: 'Selected destination',
+              location: destination,
+              status: 'SAFE',
+              waterLevelM: 0.0,
+              connectedIds: const [],
+            ),
+          ],
+          distanceKm: 0.0,
+          durationMinutes: 0.0,
+          avoidedNodes: avoidableNodes,
+          polyline: const [],
+          summary: 'No safe route available',
+          isFullySafe: false,
+          warningMessage: 'No safe route is available for this vehicle.',
+        );
+      }
+    } on _UnableToVerifySafeRoute catch (e) {
+      print('[RouteValidation] Unable to verify safe route: ${e.message}');
+      pathGenStopwatch.stop();
       return RoutePlanResult(
         path: [
           RouteNode(
@@ -657,11 +740,13 @@ class RoutePlanner {
         durationMinutes: 0.0,
         avoidedNodes: avoidableNodes,
         polyline: const [],
-        summary: 'No safe route available',
+        summary: 'Unable to verify safe route',
         isFullySafe: false,
-        warningMessage: 'No safe route is available for this vehicle.',
+        warningMessage:
+            'Unable to verify safe route because road geometry could not be fetched. Please try again later.',
       );
     }
+    
     final chosenDistanceM = _sumMeters(routePoints);
 
     // Estimate duration using the primary candidate's average speed.
@@ -801,7 +886,13 @@ class RoutePlanner {
         final b = nodes[e.to];
         // Skip already-infinite edges
         if (!e.weight.isFinite) continue;
-        var replaced = false;
+        // As in _edgeWeightFromVertexHazards: scan every overlapping hazard
+        // before deciding. Do not stop at the first ALERT match — a later
+        // hazard in the list could be a DANGER (or vehicle-impassable
+        // ALERT) overlapping the same short edge, which must win and hard
+        // -block the edge regardless of iteration order.
+        var blocked = false;
+        RouteNode? worstAlert;
         for (final hazard in hazardNodes) {
           final seg = segmentsById != null ? segmentsById[hazard.id] : null;
           if (seg == null || seg.points.length < 2) continue;
@@ -810,20 +901,23 @@ class RoutePlanner {
           // If hazard blocks this vehicle, make infinite
           if (!hazard.isPassableFor(vehicleType) || hazard.status.toUpperCase() == 'DANGER') {
             adj[u][k] = _Edge(e.to, double.infinity, e.isAlert);
-            replaced = true;
+            blocked = true;
             print('[RouteSafety] Edge $u->${e.to} BLOCKED by ${hazard.id} (way=${seg.wayId})');
             break;
           }
-          // Otherwise an ALERT applies: penalize
+          // Otherwise an ALERT applies: track the worst one, but keep
+          // scanning in case a DANGER hazard also overlaps this edge.
           if (hazard.status.toUpperCase() == 'ALERT') {
-            final base = _haversine(a, b);
-            adj[u][k] = _Edge(e.to, base * _alertPenalty, true);
-            replaced = true;
-            print('[RouteSafety] Edge $u->${e.to} penalized (ALERT ${hazard.id})');
-            break;
+            if (worstAlert == null || _hazardSeverity(hazard) > _hazardSeverity(worstAlert)) {
+              worstAlert = hazard;
+            }
           }
         }
-        if (replaced) continue;
+        if (!blocked && worstAlert != null) {
+          final base = _haversine(a, b);
+          adj[u][k] = _Edge(e.to, base * _alertPenalty, true);
+          print('[RouteSafety] Edge $u->${e.to} penalized (ALERT ${worstAlert.id})');
+        }
       }
     }
 
@@ -1026,6 +1120,16 @@ class RoutePlanner {
 
   /// Validates that [routePoints] do not intersect any blocked OSM segment
   /// (DANGER or vehicle-impassable ALERT) from [hazardNodes]/[segmentsById].
+  ///
+  /// When a hazard has no resolvable OSM geometry (e.g. Overpass has no
+  /// road within snapping distance of that camera), this falls back to a
+  /// raw-coordinate proximity check using the same _detectRadiusM already
+  /// used throughout graph construction — it does NOT refuse outright.
+  /// Refusing unconditionally here would be stricter than the actual
+  /// safety logic that already built and chose this route (which already
+  /// has this same fallback), so an already-safe route could be needlessly
+  /// discarded just because one unrelated hazard's road couldn't be
+  /// resolved, even if the route never went anywhere near that hazard.
   static bool _validateRouteAgainstBlockedSegments(
     List<LatLng> routePoints,
     Map<String, RoadSegmentResult?>? segmentsById,
@@ -1035,15 +1139,35 @@ class RoutePlanner {
     if (routePoints.length < 2) return true;
     const overlapTol = 8.0;
     for (var i = 0; i < routePoints.length - 1; i++) {
-      final edge = [routePoints[i], routePoints[i + 1]];
+      final a = routePoints[i];
+      final b = routePoints[i + 1];
+      final edge = [a, b];
       for (final hazard in hazardNodes) {
+        final isCritical = hazard.status.toUpperCase() == 'DANGER' ||
+            !hazard.isPassableFor(vehicle);
+        if (!isCritical) continue;
+
         final seg = segmentsById != null ? segmentsById[hazard.id] : null;
-        if (seg == null || seg.points.length < 2) continue;
-        final overlaps = GeoUtils.polylineOverlapsPolyline(edge, seg.points, overlapTol);
-        if (!overlaps) continue;
-        // If hazard is DANGER or not passable for this vehicle, route invalid
-        if (hazard.status.toUpperCase() == 'DANGER' || !hazard.isPassableFor(vehicle)) {
-          print('[RouteValidation] Route edge ${i} intersects blocked segment ${hazard.id}');
+        if (seg != null && seg.points.length >= 2) {
+          final overlaps =
+              GeoUtils.polylineOverlapsPolyline(edge, seg.points, overlapTol);
+          if (overlaps) {
+            print('[RouteValidation] Route edge $i intersects blocked segment ${hazard.id}');
+            return false;
+          }
+          continue;
+        }
+
+        // No OSM geometry available for this critical hazard — fall back
+        // to raw-coordinate distance, same radius used everywhere else.
+        final d1 = GeoUtils.haversineM(a, hazard.location);
+        final d2 = GeoUtils.haversineM(b, hazard.location);
+        if (d1 <= _detectRadiusM || d2 <= _detectRadiusM) {
+          print(
+            '[RouteValidation] Route edge $i passes within ${_detectRadiusM}m '
+            'of critical hazard ${hazard.id} with no OSM geometry available '
+            '— rejecting.',
+          );
           return false;
         }
       }
@@ -1175,10 +1299,21 @@ class RoutePlanner {
     }
 
     for (final hazard in hazardNodes) {
-      // Prefer to classify vertices by overlap with the cached OSM segment
-      // when available. This marks every densified vertex whose distance to
-      // the OSM polyline is within the detection radius. Only if no such
-      // overlap is found do we fall back to nearest-vertex + propagation.
+      // Classify vertices two ways and take the union of both: by overlap
+      // with the cached OSM segment (when available), AND by raw distance
+      // to the camera's own coordinate with arc-length propagation. These
+      // used to be mutually exclusive (segment match => skip the raw-
+      // coordinate fallback entirely for this hazard), but that is unsafe:
+      // RoadSegmentService can snap a camera to the wrong parallel road
+      // (a documented limitation — two close roads can't be disambiguated
+      // without camera bearing data). If that wrong segment happens to
+      // cross this candidate route somewhere irrelevant, it sets
+      // markedFromSeg=true and used to suppress ever checking the camera's
+      // real coordinate against this route at all — silently missing a
+      // genuine close pass elsewhere on the same route. mark() only ever
+      // raises a vertex's severity, never lowers it, so running both
+      // checks unconditionally is always safe (more conservative), never
+      // redundant-but-wrong.
       final seg = segmentsById != null ? segmentsById[hazard.id] : null;
       var markedFromSeg = false;
       if (seg != null && seg.points.length >= 2) {
@@ -1192,13 +1327,14 @@ class RoutePlanner {
         }
         if (markedFromSeg) {
           print('ℹ️ [RoutePlanner] Using cached OSM segment for ${hazard.id} to mark ${densified.length} vertices');
-          continue; // done with this hazard
         }
       }
 
-      // No segment-overlap found — fall back to nearest-vertex + arc-length
-      // propagation (this is the legacy behavior and is used only as a
-      // fallback when OSM topology/geometry is unavailable).
+      // ALWAYS also check the hazard's raw coordinate against this route,
+      // regardless of whether the segment-based check above matched
+      // anything. This is the fallback used when OSM topology/geometry is
+      // unavailable, but it also acts as a safety net against a wrong-road
+      // segment match.
       var nearestIdx = 0;
       var nearestDist = double.infinity;
       for (var i = 0; i < densified.length; i++) {
@@ -1248,7 +1384,19 @@ class RoutePlanner {
     // First: check full OSM segment overlaps against all hazards when
     // available. If an OSRM edge geometry overlaps a DANGER or vehicle-
     // impassable ALERT segment, it must be blocked.
+    //
+    // IMPORTANT: we must inspect every overlapping hazard before deciding,
+    // not return on the first match. A single short edge can overlap more
+    // than one hazard's road segment (e.g. an ALERT camera and a DANGER
+    // camera on the same stretch of road). If we returned as soon as we
+    // found the ALERT match, a DANGER hazard appearing later in
+    // [hazardNodes] would never be checked, and the edge would incorrectly
+    // stay "passable with penalty" instead of being hard-blocked — letting
+    // routes cross a red/DANGER zone. So: scan all overlapping hazards,
+    // block immediately on any hard block, and only fall back to the ALERT
+    // penalty once we know none of them block.
     const overlapTol = 8.0; // meters
+    RouteNode? worstOverlappingAlert;
     for (final hazard in hazardNodes) {
       final seg = segmentsById != null ? segmentsById[hazard.id] : null;
       if (seg == null || seg.points.length < 2) continue;
@@ -1260,9 +1408,15 @@ class RoutePlanner {
         return const _SegWeight(double.infinity, false);
       }
       if (hazard.status.toUpperCase() == 'ALERT') {
-        print('[RouteSafety] OSRM edge overlaps ALERT OSM segment ${hazard.id} — applying penalty');
-        return _SegWeight(base * _alertPenalty, true);
+        if (worstOverlappingAlert == null ||
+            _hazardSeverity(hazard) > _hazardSeverity(worstOverlappingAlert)) {
+          worstOverlappingAlert = hazard;
+        }
       }
+    }
+    if (worstOverlappingAlert != null) {
+      print('[RouteSafety] OSRM edge overlaps ALERT OSM segment ${worstOverlappingAlert.id} — applying penalty');
+      return _SegWeight(base * _alertPenalty, true);
     }
 
     // No overlapping OSM segment found — fall back to vertex-based hazard
@@ -1442,17 +1596,197 @@ class RoutePlanner {
     }
   }
 
+  /// Buffers a hazard's road geometry (or a single point, if no OSM
+  /// geometry is available) into an axis-aligned rectangular polygon
+  /// expanded by [bufferM] meters in every direction.
+  ///
+  /// This is deliberately simple rather than a precise polyline buffer —
+  /// a slightly generous rectangular avoid-zone around a flooded/blocked
+  /// road is the conservative, safe choice here, and a rectangle is always
+  /// a valid, non-self-intersecting polygon regardless of the input
+  /// geometry's shape, which matters because a malformed polygon would
+  /// simply be rejected by Valhalla rather than degrade gracefully.
+  static List<List<double>> _bufferToPolygon(
+    List<LatLng> points,
+    double bufferM,
+  ) {
+    if (points.isEmpty) return const [];
+    var minLat = points.first.latitude, maxLat = points.first.latitude;
+    var minLng = points.first.longitude, maxLng = points.first.longitude;
+    for (final p in points) {
+      if (p.latitude < minLat) minLat = p.latitude;
+      if (p.latitude > maxLat) maxLat = p.latitude;
+      if (p.longitude < minLng) minLng = p.longitude;
+      if (p.longitude > maxLng) maxLng = p.longitude;
+    }
+    final midLatRad = ((minLat + maxLat) / 2) * pi / 180.0;
+    final latPad = bufferM / 111320.0;
+    final lngScale = cos(midLatRad).abs().clamp(0.05, 1.0);
+    final lngPad = bufferM / (111320.0 * lngScale);
+
+    final swLat = minLat - latPad, neLat = maxLat + latPad;
+    final swLng = minLng - lngPad, neLng = maxLng + lngPad;
+
+    // Valhalla expects [lon, lat] pairs; ring must be closed (first point
+    // repeated as the last point).
+    return [
+      [swLng, swLat],
+      [neLng, swLat],
+      [neLng, neLat],
+      [swLng, neLat],
+      [swLng, swLat],
+    ];
+  }
+
+  /// Requests a route from Valhalla's public routing service, computed
+  /// against the full road network while explicitly excluding every
+  /// currently-blocked road (see the call site in planRoute() for why this
+  /// matters and how it differs from the OSRM-based candidates/detours).
+  ///
+  /// Uses Valhalla's public community demo server — like OSRM's public
+  /// demo already used elsewhere in this file, this is shared and best-
+  /// effort, not something to depend on for production/life-safety use
+  /// without self-hosting. A failure here just means this extra candidate
+  /// is unavailable for this request.
+  static Future<_OsrmRoute?> _fetchValhallaAvoidRoute({
+    required LatLng origin,
+    required LatLng destination,
+    required List<RouteNode> avoidableNodes,
+    required Map<String, RoadSegmentResult?> segmentsById,
+  }) async {
+    try {
+      const bufferM = 25.0; // safety margin around each blocked road
+      final polygons = <List<List<double>>>[];
+      for (final node in avoidableNodes) {
+        final seg = segmentsById[node.id];
+        final points = (seg != null && seg.points.length >= 2)
+            ? seg.points
+            : [node.location];
+        final poly = _bufferToPolygon(points, bufferM);
+        if (poly.isNotEmpty) polygons.add(poly);
+      }
+      if (polygons.isEmpty) return null;
+
+      // Defensive cap: Valhalla limits total exclude_polygons vertices per
+      // request. A very large flood event shouldn't produce an oversized
+      // request that gets rejected outright — better to exclude the most
+      // relevant hazards than none at all.
+      final limitedPolygons =
+          polygons.length > 50 ? polygons.sublist(0, 50) : polygons;
+
+      final body = jsonEncode({
+        'locations': [
+          {'lat': origin.latitude, 'lon': origin.longitude},
+          {'lat': destination.latitude, 'lon': destination.longitude},
+        ],
+        'costing': 'auto',
+        'exclude_polygons': limitedPolygons,
+      });
+
+      final uri = Uri.parse('https://valhalla1.openstreetmap.de/route');
+      final response = await http
+          .post(uri, headers: {'Content-Type': 'application/json'}, body: body)
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode != 200) {
+        print('[RouteSafety] Valhalla avoid-route request failed: HTTP ${response.statusCode}');
+        return null;
+      }
+
+      final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+      final trip = decoded['trip'] as Map<String, dynamic>?;
+      if (trip == null) return null;
+      final legs = trip['legs'] as List<dynamic>?;
+      if (legs == null || legs.isEmpty) return null;
+
+      final pts = <LatLng>[];
+      for (final leg in legs) {
+        final shape = (leg as Map<String, dynamic>)['shape'] as String?;
+        if (shape == null) continue;
+        pts.addAll(_decodePolyline6(shape));
+      }
+      if (pts.length < 2) return null;
+
+      // Sanity-check the decoded geometry before trusting it. A legitimate
+      // in-city route never has a multi-kilometer gap between two
+      // consecutive shape points; a jump like that means the polyline was
+      // decoded incorrectly (or the response was malformed) rather than
+      // describing a real road. Feeding that into the graph would let
+      // GeoUtils.densify() try to interpolate an enormous number of points
+      // between the two ends of that "gap" — freezing the app. Reject the
+      // whole route here instead of letting a bad point slip through.
+      const maxPlausibleGapM = 5000.0;
+      for (var i = 0; i < pts.length - 1; i++) {
+        final gap = GeoUtils.haversineM(pts[i], pts[i + 1]);
+        if (gap > maxPlausibleGapM) {
+          print(
+            '[RouteSafety] Valhalla avoid-route rejected: implausible '
+            '${gap.toStringAsFixed(0)}m gap between consecutive points '
+            '(likely a decode/response error) — discarding this candidate.',
+          );
+          return null;
+        }
+      }
+
+      final summary = trip['summary'] as Map<String, dynamic>?;
+      final lengthKm = (summary?['length'] as num?)?.toDouble() ?? 0.0;
+      final durationSec = (summary?['time'] as num?)?.toDouble() ?? 0.0;
+
+      print('[RouteSafety] Valhalla avoid-route succeeded, excluding ${polygons.length} blocked-road polygon(s)');
+      return _OsrmRoute(pts, lengthKm * 1000.0, durationSec);
+    } catch (e) {
+      print('[RouteSafety] Valhalla avoid-route request errored: $e');
+      return null;
+    }
+  }
+
+  /// Decodes a Valhalla polyline6-encoded shape string into LatLng points.
+  /// Valhalla encodes with 6 decimal places of precision (Google's
+  /// standard polyline algorithm uses 5), so a generic polyline5 decoder
+  /// would silently produce wrong coordinates rather than fail loudly.
+  static List<LatLng> _decodePolyline6(String encoded) {
+    final points = <LatLng>[];
+    var index = 0, lat = 0, lng = 0;
+    while (index < encoded.length) {
+      var result = 0, shift = 0;
+      int b;
+      do {
+        b = encoded.codeUnitAt(index++) - 63;
+        result |= (b & 0x1f) << shift;
+        shift += 5;
+      } while (b >= 0x20);
+      final dlat = (result & 1) != 0 ? ~(result >> 1) : (result >> 1);
+      lat += dlat;
+
+      result = 0;
+      shift = 0;
+      do {
+        b = encoded.codeUnitAt(index++) - 63;
+        result |= (b & 0x1f) << shift;
+        shift += 5;
+      } while (b >= 0x20);
+      final dlng = (result & 1) != 0 ? ~(result >> 1) : (result >> 1);
+      lng += dlng;
+
+      points.add(LatLng(lat / 1e6, lng / 1e6));
+    }
+    return points;
+  }
+
   /// Returns the impassable flood nodes that any candidate route passes near.
   static List<RouteNode> _dangersNearCandidates(
     List<_OsrmRoute> routes,
     List<RouteNode> impassable,
     double radiusM,
   ) {
+    // Densify each OSRM candidate before testing proximity so hazards that
+    // fall in the interior of long OSRM edges are detected reliably.
     final found = <RouteNode>[];
     for (final node in impassable) {
       var near = false;
       for (final route in routes) {
-        for (final p in route.points) {
+        // densify route to ensure we sample interior points on long straights
+        final dens = GeoUtils.densify(route.points, _maxEdgeLengthM);
+        for (final p in dens) {
           if (_haversine(p, node.location) <= radiusM) {
             near = true;
             break;
@@ -1460,41 +1794,140 @@ class RoutePlanner {
         }
         if (near) break;
       }
-      if (near) found.add(node);
+      if (near) {
+        found.add(node);
+        print('[RouteSafety] Candidate routes pass near hazard ${node.id} status=${node.status} water=${node.waterLevelM}');
+      }
     }
     return found;
   }
 
+  /// Hazards within this many meters of each other are treated as one
+  /// cluster when generating detour waypoints, so a corridor with several
+  /// nearby cameras gets ONE wide detour around the whole affected stretch
+  /// instead of several tightly-spaced offset points that no real road can
+  /// thread between.
+  static const double _hazardClusterRadiusM = 300.0;
+
   /// Requests detour routes that steer around the given danger points by
   /// injecting offset waypoints, then asking OSRM to route through them.
+  ///
+  /// Escalates through a widening range of offsets and tries both sides of
+  /// the direct path explicitly, stopping as soon as a candidate is
+  /// confirmed (via [avoidableNodes]) to clear every impassable hazard.
+  /// This matters because if no detour here ever clears the hazards,
+  /// planRoute() has no safe graph edges to route through at all — Dijkstra
+  /// returns null, and the caller falls back to showing the raw, unsafe
+  /// OSRM route. Trying harder here is the difference between a genuine
+  /// safe (if longer) route and an unsafe one being shown to the user.
   static Future<List<_OsrmRoute>> _fetchDetourRoutes({
     required LatLng origin,
     required LatLng destination,
     required List<RouteNode> dangers,
+    required List<RouteNode> avoidableNodes,
   }) async {
     final results = <_OsrmRoute>[];
     final bearing = _bearing(origin, destination);
+    final clusters = _clusterHazards(dangers, _hazardClusterRadiusM);
 
-    // Try a couple of offset distances so at least one lands on a real
-    // parallel road that OSRM can follow around the danger.
-    for (final offsetKm in const [0.4, 0.8]) {
-      final waypoints = <LatLng>[];
-      for (final d in dangers) {
-        final left = _offsetPoint(d.location, bearing + 90, offsetKm);
-        final right = _offsetPoint(d.location, bearing - 90, offsetKm);
-        // Pick the side that stays farther from every danger point.
-        final leftClear = _minDistanceToNodes(left, dangers);
-        final rightClear = _minDistanceToNodes(right, dangers);
-        waypoints.add(leftClear > rightClear ? left : right);
+    const offsetsKm = [0.3, 0.6, 1.0, 1.5, 2.2, 3.0];
+
+    for (final offsetKm in offsetsKm) {
+      for (final sideSign in [1, -1]) {
+        final waypoints = <LatLng>[];
+        for (final cluster in clusters) {
+          final center = _clusterCentroid(cluster);
+          // Push the waypoint out far enough to clear the offset AND the
+          // cluster's own spread — a tight point-offset from a cluster's
+          // centroid can still land inside the cluster's outer members.
+          final spreadM = _clusterMaxRadiusM(cluster, center);
+          final effectiveOffsetKm = offsetKm + (spreadM / 1000.0);
+          waypoints.add(
+            _offsetPoint(center, bearing + (90 * sideSign), effectiveOffsetKm),
+          );
+        }
+        waypoints.sort(
+          (a, b) => _haversine(origin, a).compareTo(_haversine(origin, b)),
+        );
+
+        final route = await _fetchOsrmViaWaypoints(origin, destination, waypoints);
+        if (route == null) continue;
+
+        final stillNear = _dangersNearCandidates([route], avoidableNodes, _detectRadiusM);
+        final sideLabel = sideSign > 0 ? 'left' : 'right';
+        if (stillNear.isEmpty) {
+          print('[RouteSafety] Detour cleared all hazards at offset=${offsetKm}km side=$sideLabel');
+          results.add(route);
+        } else {
+          print(
+            '[RouteSafety] Detour attempt offset=${offsetKm}km side=$sideLabel '
+            'still near: ${stillNear.map((h) => h.id).join(', ')}',
+          );
+        }
       }
-      waypoints.sort(
-        (a, b) => _haversine(origin, a).compareTo(_haversine(origin, b)),
-      );
-      final route =
-          await _fetchOsrmViaWaypoints(origin, destination, waypoints);
-      if (route != null) results.add(route);
+      // Stop escalating once at least one fully clear detour exists — no
+      // need to keep hammering OSRM once a safe alternative is available.
+      if (results.isNotEmpty) break;
     }
+
+    if (results.isEmpty) {
+      print(
+        '[RouteSafety] No detour offset up to ${offsetsKm.last}km cleared all '
+        'hazards for ${dangers.map((d) => d.id).join(', ')} — no safe '
+        'alternative could be constructed.',
+      );
+    }
+
     return results;
+  }
+
+  /// Groups hazards into clusters where every member is within
+  /// [radiusM] of at least one other member of the same cluster
+  /// (single-linkage clustering). Used so a stretch of road with several
+  /// nearby cameras gets one combined detour instead of one per camera.
+  static List<List<RouteNode>> _clusterHazards(
+    List<RouteNode> hazards,
+    double radiusM,
+  ) {
+    final clusters = <List<RouteNode>>[];
+    for (final h in hazards) {
+      List<RouteNode>? joined;
+      for (final cluster in clusters) {
+        final closeToCluster = cluster.any(
+          (member) => _haversine(member.location, h.location) <= radiusM,
+        );
+        if (closeToCluster) {
+          joined = cluster;
+          break;
+        }
+      }
+      if (joined != null) {
+        joined.add(h);
+      } else {
+        clusters.add([h]);
+      }
+    }
+    return clusters;
+  }
+
+  /// Simple average-position centroid of a hazard cluster.
+  static LatLng _clusterCentroid(List<RouteNode> cluster) {
+    var lat = 0.0, lng = 0.0;
+    for (final h in cluster) {
+      lat += h.location.latitude;
+      lng += h.location.longitude;
+    }
+    return LatLng(lat / cluster.length, lng / cluster.length);
+  }
+
+  /// Farthest distance (meters) from [center] to any member of [cluster].
+  static double _clusterMaxRadiusM(List<RouteNode> cluster, LatLng center) {
+    var maxDist = 0.0;
+    for (final h in cluster) {
+      final d = _haversine(center, h.location);
+      if (d > maxDist) maxDist = d;
+    }
+    return maxDist;
   }
 
   /// Fetches a single OSRM route that passes through the given intermediate
@@ -1580,6 +2013,37 @@ class RoutePlanner {
     return '${point.longitude.toStringAsFixed(6)},${point.latitude.toStringAsFixed(6)}';
   }
 
+  /// Extracts a stable string identifier for a CCTV document.
+  ///
+  /// IMPORTANT: this must be based on the document's own database identity
+  /// (_id), never on its position in the docs list. An index-based ID
+  /// (e.g. 'c${index+1}') silently reassigns every camera's "identity"
+  /// whenever a document is added, removed, or reordered upstream —
+  /// deleting one camera would make the next camera in the list inherit
+  /// its old label. That breaks anyone reasoning about "camera cN" across
+  /// two points in time (a person reading logs, or _checkRerouteAccuracy
+  /// comparing previousDocs vs currentDocs camera-by-camera), because the
+  /// label no longer reliably points at the same physical camera.
+  static String _stableCctvId(Map<String, dynamic> doc, int fallbackIndex) {
+    final rawId = doc['_id'];
+    if (rawId is String && rawId.isNotEmpty) return rawId;
+    if (rawId is Map && rawId[r'$oid'] is String) {
+      return rawId[r'$oid'] as String;
+    }
+    final altId = doc['id'] ?? doc['camera_id'] ?? doc['cctv_id'];
+    if (altId is String && altId.isNotEmpty) return altId;
+    // Fallback only if the document truly has no stable identifier at all
+    // (shouldn't happen for a real MongoDB document, which always has an
+    // _id) — flagged loudly since this reintroduces the reshuffling risk.
+    print(
+      '⚠️ [RoutePlanner] CCTV doc at index $fallbackIndex has no _id/id/'
+      'camera_id field — falling back to a positional ID, which will NOT '
+      'stay stable if the document list is ever reordered or another '
+      'document is added/removed.',
+    );
+    return 'idx$fallbackIndex';
+  }
+
   static List<RouteNode> _seedNodes(List<Map<String, dynamic>> docs) {
     return docs.asMap().entries.map((entry) {
       final index = entry.key;
@@ -1589,9 +2053,10 @@ class RoutePlanner {
       final latitude = coordinates[1] as num;
       final status = (doc['status'] as String).toUpperCase();
       final waterLevelM = (doc['water_level'] as num).toDouble();
+      final stableId = _stableCctvId(doc, index);
 
       return RouteNode(
-        id: 'c${index + 1}',
+        id: stableId,
         name: 'CCTV-${(index + 1).toString().padLeft(2, '0')}',
         roadName: 'CCTV node ${index + 1}',
         location: LatLng(latitude.toDouble(), longitude.toDouble()),

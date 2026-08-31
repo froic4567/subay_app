@@ -94,12 +94,35 @@ class GeoUtils {
   static List<LatLng> densify(List<LatLng> polyline, double maxSegmentM) {
     if (polyline.length < 2 || maxSegmentM <= 0) return polyline;
 
+    // Defensive cap: a legitimate single vertex-to-vertex gap in a real
+    // road route is never more than a few km, even on long rural
+    // straights. If some upstream source (a third-party routing API, a
+    // polyline decoder bug, corrupted data, etc.) ever hands us a pair of
+    // points with an enormous gap between them — e.g. one garbled
+    // coordinate landing near (0,0) — computing steps = dist/maxSegmentM
+    // with no ceiling would try to generate potentially millions of
+    // interpolated points and freeze the app. Capping steps per segment
+    // makes this function safe regardless of what feeds it; a capped
+    // segment is a rare/degenerate case being handled gracefully, not a
+    // silently-accepted routing decision (see also the sanity check on
+    // the decoded route itself where it's first constructed).
+    const maxStepsPerSegment = 500;
+
     final result = <LatLng>[polyline.first];
     for (var i = 0; i < polyline.length - 1; i++) {
       final a = polyline[i];
       final b = polyline[i + 1];
       final dist = haversineM(a, b);
-      final steps = dist > maxSegmentM ? (dist / maxSegmentM).ceil() : 1;
+      var steps = dist > maxSegmentM ? (dist / maxSegmentM).ceil() : 1;
+      if (steps > maxStepsPerSegment) {
+        // ignore: avoid_print
+        print(
+          '⚠️ [GeoUtils] densify: capping an abnormally large gap '
+          '(${dist.toStringAsFixed(0)}m) to $maxStepsPerSegment steps — '
+          'this usually means upstream route data is corrupt.',
+        );
+        steps = maxStepsPerSegment;
+      }
       for (var s = 1; s <= steps; s++) {
         final t = s / steps;
         result.add(
