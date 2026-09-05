@@ -77,6 +77,10 @@ The app is fully database-driven for flood data: if the backend or MongoDB is un
 - `location`: `{ type: "Point", coordinates: [lng, lat] }` (GeoJSON)
 - `timestamp`: ISO date string
 
+### Compatibility Note
+
+- **Backend compatibility:** The backend now converts MongoDB `_id` values to string when returning API responses so the mobile app can reliably consume document identifiers. The mobile client is compatible with the expanded document structure (additional fields like `hsv_thresholds`, `roi_config`, `stream_config`, and `last_evaluation` are ignored by the app and do not affect routing or map rendering).
+
 ### RouteNode (internal routing graph node, `lib/services/route_planner.dart`)
 
 - `id`, `name`, `roadName`: string

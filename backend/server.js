@@ -68,6 +68,18 @@ function scheduleReconnect() {
 app.use(cors());
 app.use(express.json());
 
+// Ensure documents are JSON-safe for clients: convert ObjectId to string
+function sanitizeDocs(docs) {
+  return docs.map((d) => {
+    // shallow copy so we don't mutate the DB result
+    const copy = { ...d };
+    if (copy._id && typeof copy._id.toString === 'function') {
+      copy._id = copy._id.toString();
+    }
+    return copy;
+  });
+}
+
 // ── Routes ─────────────────────────────────────────────────────────────────
 
 // Health check
@@ -86,7 +98,7 @@ app.get('/api/cctv', async (req, res) => {
     }
 
     const documents = await dbCollection.find({}).toArray();
-    res.json(documents);
+    res.json(sanitizeDocs(documents));
   } catch (err) {
     console.error('Error fetching CCTV data:', err.message);
     res.json([]);
@@ -102,7 +114,7 @@ app.get('/api/cctv/:status', async (req, res) => {
 
     const status = req.params.status.toLowerCase();
     const documents = await dbCollection.find({ status: status }).toArray();
-    res.json(documents);
+    res.json(sanitizeDocs(documents));
   } catch (err) {
     console.error('Error fetching CCTV data by status:', err.message);
     res.json([]);
@@ -128,7 +140,7 @@ app.get('/api/alerts', async (req, res) => {
       return tb - ta;
     });
 
-    res.json(documents);
+    res.json(sanitizeDocs(documents));
   } catch (err) {
     console.error('Error fetching alerts:', err.message);
     res.json([]);
