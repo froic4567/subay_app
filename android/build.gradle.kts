@@ -1,3 +1,8 @@
+plugins {
+    // Google Services reads google-services.json and generates Firebase resources.
+    id("com.google.gms.google-services") version "4.5.0" apply false
+}
+
 allprojects {
     repositories {
         google()
