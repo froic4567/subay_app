@@ -10,7 +10,10 @@ class RoutingTestSnapshot {
   final Duration graphConstructionTime;
   final Duration pathGenerationLatency;
   final Duration dbFetchTime;
+  final Duration overpassFetchTime;
   final Duration osrmFetchTime;
+  final Duration detourSearchTime;
+  final Duration valhallaFetchTime;
   final Duration dijkstraTime;
 
   final bool dangerFreeRoute;
@@ -38,7 +41,10 @@ class RoutingTestSnapshot {
     required this.graphConstructionTime,
     required this.pathGenerationLatency,
     required this.dbFetchTime,
+    this.overpassFetchTime = Duration.zero,
     required this.osrmFetchTime,
+    this.detourSearchTime = Duration.zero,
+    this.valhallaFetchTime = Duration.zero,
     required this.dijkstraTime,
     required this.dangerFreeRoute,
     required this.alertPreferenceApplicable,
@@ -87,6 +93,16 @@ class RoutingTestLogger {
     final ts = DateTime.now().toUtc().toIso8601String();
     final graphMs = snapshot.graphConstructionTime.inMicroseconds / 1000.0;
     final pathMs = snapshot.pathGenerationLatency.inMicroseconds / 1000.0;
+    final timedStages =
+        snapshot.dbFetchTime +
+        snapshot.overpassFetchTime +
+        snapshot.osrmFetchTime +
+        snapshot.detourSearchTime +
+        snapshot.valhallaFetchTime +
+        snapshot.graphConstructionTime +
+        snapshot.dijkstraTime;
+    final unaccountedMs =
+        (snapshot.pathGenerationLatency - timedStages).inMicroseconds / 1000.0;
 
     final dangerRate = _pct(_session.dangerFreeCount, _session.totalRouteRequests);
     final alertScore = _pct(
@@ -179,26 +195,36 @@ class RoutingTestLogger {
         '(Target: ≤ 10 ms) [${overheadPass ? 'PASS' : 'FAIL'}]',
       )
       ..writeln()
-      ..writeln('End-to-End Latency Chain (available stages):')
+      ..writeln('End-to-End Latency Chain:')
       ..writeln(
-        '    DB Read (flood sync)     : ${(snapshot.dbFetchTime.inMicroseconds / 1000).toStringAsFixed(0)} ms',
+        '    DB Read                  : ${(snapshot.dbFetchTime.inMicroseconds / 1000).toStringAsFixed(0)} ms',
       )
       ..writeln(
-        '    OSRM Fetch               : ${(snapshot.osrmFetchTime.inMicroseconds / 1000).toStringAsFixed(0)} ms',
+        '    Overpass Fetch           : ${(snapshot.overpassFetchTime.inMicroseconds / 1000).toStringAsFixed(0)} ms',
       )
       ..writeln(
-        '    Graph Construction       : ${graphMs.toStringAsFixed(0)} ms',
+        '    OSRM Fetch (primary)     : ${(snapshot.osrmFetchTime.inMicroseconds / 1000).toStringAsFixed(0)} ms',
       )
       ..writeln(
-        '    Dijkstra Computation     : ${(snapshot.dijkstraTime.inMicroseconds / 1000).toStringAsFixed(0)} ms',
+        '    Detour Search            : ${(snapshot.detourSearchTime.inMicroseconds / 1000).toStringAsFixed(0)} ms',
+      )
+      ..writeln(
+        '    Valhalla Fetch           : ${(snapshot.valhallaFetchTime.inMicroseconds / 1000).toStringAsFixed(0)} ms',
+      )
+      ..writeln(
+        '    Graph Construction (_buildGraph only): ${graphMs.toStringAsFixed(0)} ms',
+      )
+      ..writeln(
+        '    Dijkstra                 : ${(snapshot.dijkstraTime.inMicroseconds / 1000).toStringAsFixed(0)} ms',
       )
       ..writeln(
         '    Total Path Generation    : ${pathMs.toStringAsFixed(0)} ms  '
         '(Tresponse full-cycle proxy)',
       )
       ..writeln(
-        '    Active CCTV Feeds        : ${snapshot.activeFeedCount}',
+        '    Unaccounted time         : ${unaccountedMs.toStringAsFixed(0)} ms',
       )
+      ..writeln('    Active CCTV Feeds        : ${snapshot.activeFeedCount}')
       ..writeln()
       ..writeln('Route Output: $nodeSeq')
       ..writeln(

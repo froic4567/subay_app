@@ -24,51 +24,39 @@ class RouteRequestContext {
 /// Vehicle types available for route planning.
 /// Thresholds match the passability table shown in map_screen.dart
 /// so the routing logic and the UI display stay consistent.
-enum VehicleType { bicycle, motorcycle, sedan, suv, truck }
+enum VehicleType { light, medium, heavy }
 
 extension VehicleTypeLabel on VehicleType {
   String get label {
     switch (this) {
-      case VehicleType.bicycle:
-        return 'Bicycle';
-      case VehicleType.motorcycle:
-        return 'Motorcycle';
-      case VehicleType.sedan:
-        return 'Sedan / Car';
-      case VehicleType.suv:
-        return 'SUV / Van';
-      case VehicleType.truck:
-        return 'Truck / Bus';
+      case VehicleType.light:
+        return 'Light Vehicle';
+      case VehicleType.medium:
+        return 'Medium Vehicle';
+      case VehicleType.heavy:
+        return 'Heavy Vehicle';
     }
   }
 
   /// Maximum flood water depth (in meters) this vehicle type can safely pass.
   double get maxWaterLevelM {
     switch (this) {
-      case VehicleType.bicycle:
+      case VehicleType.light:
         return 0.15;
-      case VehicleType.motorcycle:
+      case VehicleType.medium:
         return 0.25;
-      case VehicleType.sedan:
-        return 0.40;
-      case VehicleType.suv:
+      case VehicleType.heavy:
         return 0.65;
-      case VehicleType.truck:
-        return 0.90;
     }
   }
 
   IconData get icon {
     switch (this) {
-      case VehicleType.bicycle:
-        return Icons.pedal_bike;
-      case VehicleType.motorcycle:
-        return Icons.two_wheeler;
-      case VehicleType.sedan:
+      case VehicleType.light:
         return Icons.directions_car;
-      case VehicleType.suv:
+      case VehicleType.medium:
         return Icons.airport_shuttle;
-      case VehicleType.truck:
+      case VehicleType.heavy:
         return Icons.local_shipping;
     }
   }
@@ -394,13 +382,18 @@ class RoutePlanner {
     required VehicleType vehicleType,
     RouteRequestContext? context,
   }) async {
+    // Measures the complete planRoute execution, including all timed stages.
     final pathGenStopwatch = Stopwatch()..start();
     var dbFetchTime = Duration.zero;
+    var overpassFetchTime = Duration.zero;
     var osrmFetchTime = Duration.zero;
+    var detourSearchTime = Duration.zero;
+    var valhallaFetchTime = Duration.zero;
     var graphConstructionTime = Duration.zero;
     var dijkstraTime = Duration.zero;
 
     // 1. Fetch live CCTV flood data from MongoDB via the backend API.
+    // Measures only the CCTV backend read.
     final dbStopwatch = Stopwatch()..start();
     final cctvDocs = await CctvService.fetchCctvData();
     dbStopwatch.stop();
@@ -418,73 +411,41 @@ class RoutePlanner {
         .where((n) => n.status.toUpperCase() == 'DANGER')
         .toList();
 
-    // 2. Fetch OSRM candidate routes (primary + alternatives).
-    final osrmStopwatch = Stopwatch()..start();
-    final routes = <_OsrmRoute>[...await _fetchOsrmRoutes(origin, destination)];
-    if (routes.isEmpty) {
-      pathGenStopwatch.stop();
-      _emitRoutingLog(
-        origin: origin,
-        destination: destination,
-        context: context,
-        pathGenerationLatency: pathGenStopwatch.elapsed,
-        graphConstructionTime: graphConstructionTime,
-        dbFetchTime: dbFetchTime,
-        osrmFetchTime: osrmStopwatch.elapsed,
-        dijkstraTime: dijkstraTime,
-        cctvDocs: cctvDocs,
-        hazardNodes: hazardNodes,
-        dangerNodes: dangerNodes,
-        routes: routes,
-        vehicleType: vehicleType,
-        routeFound: false,
-        adj: null,
-        src: 0,
-        dst: 0,
-      );
-      return null;
-    }
-
-    // 2b. If any candidate grazes an impassable flood point, actively request
-    //     detour routes that steer OSRM around those points via offset
-    //     waypoints. OSRM's own alternatives often all funnel through the same
-    //     choke point on straight roads, so without this Dijkstra would have no
-    //     genuinely safe candidate to choose.
-    final dangersOnRoute =
-        _dangersNearCandidates(routes, avoidableNodes, _detectRadiusM);
-    if (dangersOnRoute.isNotEmpty) {
-      final detours = await _fetchDetourRoutes(
-        origin: origin,
-        destination: destination,
-        dangers: dangersOnRoute,
-        avoidableNodes: avoidableNodes,
-      );
-      // _fetchDetourRoutes already validates each candidate against
-      // avoidableNodes internally (needed so it can stop escalating once a
-      // clean detour is found), so every route returned here is confirmed
-      // hazard-free — just add them all as Dijkstra candidates.
-      routes.addAll(detours);
-    }
-    osrmStopwatch.stop();
-    osrmFetchTime = osrmStopwatch.elapsed;
-
-    // 3–5. Build one merged graph from all candidates. Attempt to fetch
-    // RoadSegment geometry for hazards so vertex-hazard checks can use the
-    // actual road polyline where available; fall back to point-distance if
-    // Overpass/segment lookup fails or is missing.
-    final graphStopwatch = Stopwatch()..start();
+    // 1b. Fetch real OSM road-segment geometry for every hazard BEFORE
+    //     generating any OSRM candidates or detours. This used to happen
+    //     much later (right before graph construction), which meant
+    //     detour generation and validation (_dangersNearCandidates,
+    //     _fetchDetourRoutes) could only check a candidate route against
+    //     the hazard's raw camera coordinate + a fixed radius — a much
+    //     coarser check than the real OSM segment geometry the graph-
+    //     building phase actually enforces. A detour could clear that
+    //     coarse check (declared "safe" and stop escalating) while still
+    //     crossing the hazard's real road segment, which can extend well
+    //     beyond the camera's exact point — only to get blocked anyway
+    //     once graph construction ran the accurate check, wasting the one
+    //     detour attempt that was accepted and leaving Dijkstra with no
+    //     safe path at all. Fetching geometry first lets every downstream
+    //     check use the same, accurate definition of "near this hazard."
     final Map<String, RoadSegmentResult?> segmentsById = {};
+    // Measures only the Overpass road-segment request.
+    final overpassStopwatch = Stopwatch();
     try {
       // Batch fetch segments for all hazard nodes in one Overpass bbox
       // query to reuse cached geometry and avoid many individual requests.
       final idToCoord = {
         for (final n in hazardNodes) n.id: n.location,
       };
+      overpassStopwatch.start();
       final fetched = await RoadSegmentService.getSegmentsForCoordinates(idToCoord);
+      overpassStopwatch.stop();
+      overpassFetchTime = overpassStopwatch.elapsed;
       for (final n in hazardNodes) {
         segmentsById[n.id] = fetched[n.id];
       }
     } catch (e) {
+      // Include the request duration when the Overpass call throws.
+      if (overpassStopwatch.isRunning) overpassStopwatch.stop();
+      overpassFetchTime = overpassStopwatch.elapsed;
       print('⚠️ [RoutePlanner] Road segment lookups failed: $e');
       print('[RoadSegmentCache] TIMEOUT or geometry fetch failure');
       // Conservative behavior: if any hazard is DANGER or an ALERT that
@@ -531,6 +492,74 @@ class RoutePlanner {
       // Otherwise continue using whatever cache is available and fallbacks.
     }
 
+    // 2. Fetch OSRM candidate routes (primary + alternatives).
+    // Measures only the primary OSRM route-fetch call.
+    final osrmStopwatch = Stopwatch()..start();
+    final routes = <_OsrmRoute>[...await _fetchOsrmRoutes(origin, destination)];
+    osrmStopwatch.stop();
+    osrmFetchTime = osrmStopwatch.elapsed;
+    if (routes.isEmpty) {
+      pathGenStopwatch.stop();
+      _emitRoutingLog(
+        origin: origin,
+        destination: destination,
+        context: context,
+        pathGenerationLatency: pathGenStopwatch.elapsed,
+        graphConstructionTime: graphConstructionTime,
+        dbFetchTime: dbFetchTime,
+        overpassFetchTime: overpassFetchTime,
+        osrmFetchTime: osrmFetchTime,
+        detourSearchTime: detourSearchTime,
+        valhallaFetchTime: valhallaFetchTime,
+        dijkstraTime: dijkstraTime,
+        cctvDocs: cctvDocs,
+        hazardNodes: hazardNodes,
+        dangerNodes: dangerNodes,
+        routes: routes,
+        vehicleType: vehicleType,
+        routeFound: false,
+        adj: null,
+        src: 0,
+        dst: 0,
+      );
+      return null;
+    }
+
+    // 2b. If any candidate grazes an impassable flood point, actively request
+    //     detour routes that steer OSRM around those points via offset
+    //     waypoints. OSRM's own alternatives often all funnel through the same
+    //     choke point on straight roads, so without this Dijkstra would have no
+    //     genuinely safe candidate to choose. Both checks now use the real
+    //     OSM segment geometry fetched above (see step 1b) wherever
+    //     available, not just the hazard's raw coordinate.
+    // Measures candidate danger checks and all OSRM detour-search attempts.
+    final detourStopwatch = Stopwatch()..start();
+    final dangersOnRoute = _dangersNearCandidates(
+      routes,
+      avoidableNodes,
+      _detectRadiusM,
+      segmentsById: segmentsById,
+    );
+    if (dangersOnRoute.isNotEmpty) {
+      final detours = await _fetchDetourRoutes(
+        origin: origin,
+        destination: destination,
+        dangers: dangersOnRoute,
+        avoidableNodes: avoidableNodes,
+        segmentsById: segmentsById,
+      );
+      detourStopwatch.stop();
+      detourSearchTime = detourStopwatch.elapsed;
+      // _fetchDetourRoutes already validates each candidate against
+      // avoidableNodes internally (needed so it can stop escalating once a
+      // clean detour is found), so every route returned here is confirmed
+      // hazard-free — just add them all as Dijkstra candidates.
+      routes.addAll(detours);
+    } else {
+      detourStopwatch.stop();
+      detourSearchTime = detourStopwatch.elapsed;
+    }
+
     // 2c. Ask Valhalla's public routing service for a route that is
     //     computed directly against the real road network while explicitly
     //     excluding every currently-blocked road. This is fundamentally
@@ -546,17 +575,23 @@ class RoutePlanner {
     //     extra candidate wasn't available," and the OSRM candidates/
     //     detours computed above still run independently either way.
     if (avoidableNodes.isNotEmpty) {
+      // Measures only the Valhalla route-fetch call.
+      final valhallaStopwatch = Stopwatch()..start();
       final valhallaRoute = await _fetchValhallaAvoidRoute(
         origin: origin,
         destination: destination,
         avoidableNodes: avoidableNodes,
         segmentsById: segmentsById,
       );
+      valhallaStopwatch.stop();
+      valhallaFetchTime = valhallaStopwatch.elapsed;
       if (valhallaRoute != null) {
         routes.add(valhallaRoute);
       }
     }
 
+    // Measures only local graph construction in _buildGraph.
+    final graphStopwatch = Stopwatch()..start();
     final graph = _buildGraph(
       routes: routes,
       origin: origin,
@@ -574,6 +609,7 @@ class RoutePlanner {
     final dst = graph.dst;
 
     // 6. Run Dijkstra to find the safest guaranteed path.
+    // Measures only the Dijkstra shortest-path computation.
     final dijkstraStopwatch = Stopwatch()..start();
     final dijkstra = _dijkstra(adj, src, dst);
     dijkstraStopwatch.stop();
@@ -618,7 +654,10 @@ class RoutePlanner {
         pathGenerationLatency: pathGenStopwatch.elapsed,
         graphConstructionTime: graphConstructionTime,
         dbFetchTime: dbFetchTime,
+        overpassFetchTime: overpassFetchTime,
         osrmFetchTime: osrmFetchTime,
+        detourSearchTime: detourSearchTime,
+        valhallaFetchTime: valhallaFetchTime,
         dijkstraTime: dijkstraTime,
         cctvDocs: cctvDocs,
         hazardNodes: hazardNodes,
@@ -653,8 +692,6 @@ class RoutePlanner {
 
     // Final validation: ensure resulting route does NOT intersect any
     // blocked OSM segment for the selected vehicle (defensive check).
-    // Final validation: ensure resulting route does NOT intersect any
-    // blocked OSM segment for the selected vehicle (defensive check).
     try {
       final valid = _validateRouteAgainstBlockedSegments(routePoints, segmentsById, hazardNodes, vehicleType);
       if (!valid) {
@@ -669,7 +706,10 @@ class RoutePlanner {
           pathGenerationLatency: pathGenStopwatch.elapsed,
           graphConstructionTime: graphConstructionTime,
           dbFetchTime: dbFetchTime,
+          overpassFetchTime: overpassFetchTime,
           osrmFetchTime: osrmFetchTime,
+          detourSearchTime: detourSearchTime,
+          valhallaFetchTime: valhallaFetchTime,
           dijkstraTime: dijkstraTime,
           cctvDocs: cctvDocs,
           hazardNodes: hazardNodes,
@@ -771,7 +811,10 @@ class RoutePlanner {
       pathGenerationLatency: pathGenStopwatch.elapsed,
       graphConstructionTime: graphConstructionTime,
       dbFetchTime: dbFetchTime,
+      overpassFetchTime: overpassFetchTime,
       osrmFetchTime: osrmFetchTime,
+      detourSearchTime: detourSearchTime,
+      valhallaFetchTime: valhallaFetchTime,
       dijkstraTime: dijkstraTime,
       cctvDocs: cctvDocs,
       hazardNodes: hazardNodes,
@@ -931,7 +974,10 @@ class RoutePlanner {
     required Duration pathGenerationLatency,
     required Duration graphConstructionTime,
     required Duration dbFetchTime,
+    required Duration overpassFetchTime,
     required Duration osrmFetchTime,
+    required Duration detourSearchTime,
+    required Duration valhallaFetchTime,
     required Duration dijkstraTime,
     required List<Map<String, dynamic>> cctvDocs,
     required List<RouteNode> hazardNodes,
@@ -991,7 +1037,10 @@ class RoutePlanner {
         graphConstructionTime: graphConstructionTime,
         pathGenerationLatency: pathGenerationLatency,
         dbFetchTime: dbFetchTime,
+        overpassFetchTime: overpassFetchTime,
         osrmFetchTime: osrmFetchTime,
+        detourSearchTime: detourSearchTime,
+        valhallaFetchTime: valhallaFetchTime,
         dijkstraTime: dijkstraTime,
         dangerFreeRoute: dangerFree,
         alertPreferenceApplicable: alertApplicable,
@@ -1776,20 +1825,44 @@ class RoutePlanner {
   static List<RouteNode> _dangersNearCandidates(
     List<_OsrmRoute> routes,
     List<RouteNode> impassable,
-    double radiusM,
-  ) {
+    double radiusM, {
+    Map<String, RoadSegmentResult?>? segmentsById,
+  }) {
     // Densify each OSRM candidate before testing proximity so hazards that
     // fall in the interior of long OSRM edges are detected reliably.
+    //
+    // IMPORTANT: check against the hazard's real OSM road-segment geometry
+    // (when available) first, not just its raw camera coordinate. The
+    // graph-building phase (_computeVertexHazards) marks a route as
+    // affected by a hazard whenever it comes within [radiusM] of that
+    // hazard's actual road polyline — which can extend well beyond the
+    // camera's exact point. If this function only checked the raw
+    // coordinate, a detour could be accepted here as "clear" while still
+    // crossing the real road segment, only to be blocked once graph
+    // construction ran its more accurate check — wasting the accepted
+    // detour and potentially leaving no safe path at all.
     final found = <RouteNode>[];
     for (final node in impassable) {
       var near = false;
+      final seg = segmentsById != null ? segmentsById[node.id] : null;
       for (final route in routes) {
         // densify route to ensure we sample interior points on long straights
         final dens = GeoUtils.densify(route.points, _maxEdgeLengthM);
-        for (final p in dens) {
-          if (_haversine(p, node.location) <= radiusM) {
-            near = true;
-            break;
+        if (seg != null && seg.points.length >= 2) {
+          for (final p in dens) {
+            final proj = GeoUtils.nearestPointOnPolyline(p, seg.points);
+            if ((proj?.distanceM ?? double.infinity) <= radiusM) {
+              near = true;
+              break;
+            }
+          }
+        }
+        if (!near) {
+          for (final p in dens) {
+            if (_haversine(p, node.location) <= radiusM) {
+              near = true;
+              break;
+            }
           }
         }
         if (near) break;
@@ -1820,17 +1893,26 @@ class RoutePlanner {
   /// returns null, and the caller falls back to showing the raw, unsafe
   /// OSRM route. Trying harder here is the difference between a genuine
   /// safe (if longer) route and an unsafe one being shown to the user.
+  ///
+  /// The offset list intentionally reaches much farther than a typical
+  /// in-city detour (up to 12km) because a large or elongated hazard
+  /// cluster can require going most of the way around a river/floodplain
+  /// via a bridge/crossing that is genuinely far from the direct
+  /// origin-destination line — see planRoute() callers' notes on why a
+  /// perpendicular offset that stops too early makes a real, if longer,
+  /// safe route invisible even when one exists.
   static Future<List<_OsrmRoute>> _fetchDetourRoutes({
     required LatLng origin,
     required LatLng destination,
     required List<RouteNode> dangers,
     required List<RouteNode> avoidableNodes,
+    Map<String, RoadSegmentResult?>? segmentsById,
   }) async {
     final results = <_OsrmRoute>[];
     final bearing = _bearing(origin, destination);
     final clusters = _clusterHazards(dangers, _hazardClusterRadiusM);
 
-    const offsetsKm = [0.3, 0.6, 1.0, 1.5, 2.2, 3.0];
+    const offsetsKm = [0.3, 0.6, 1.0, 1.5, 2.2, 3.0, 4.5, 6.5, 9.0, 12.0];
 
     for (final offsetKm in offsetsKm) {
       for (final sideSign in [1, -1]) {
@@ -1853,7 +1935,16 @@ class RoutePlanner {
         final route = await _fetchOsrmViaWaypoints(origin, destination, waypoints);
         if (route == null) continue;
 
-        final stillNear = _dangersNearCandidates([route], avoidableNodes, _detectRadiusM);
+        // Validated against real road-segment geometry when available (see
+        // _dangersNearCandidates) — not just the hazard's raw coordinate —
+        // so a route accepted here is confirmed clear by the same standard
+        // graph construction will apply, instead of being re-blocked later.
+        final stillNear = _dangersNearCandidates(
+          [route],
+          avoidableNodes,
+          _detectRadiusM,
+          segmentsById: segmentsById,
+        );
         final sideLabel = sideSign > 0 ? 'left' : 'right';
         if (stillNear.isEmpty) {
           print('[RouteSafety] Detour cleared all hazards at offset=${offsetKm}km side=$sideLabel');

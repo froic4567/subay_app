@@ -159,6 +159,38 @@ If the app can't reach the backend, check that Windows Firewall allows inbound c
 
 ---
 
+## Database Test Scenarios
+
+The database test loader applies one selected scenario per run. It displays each
+sensor location, status, and water level, then waits for the exact confirmation
+`UPLOAD` before writing. To run it from PowerShell:
+
+```powershell
+cd backend
+py -m pip install -r requirements-test-data.txt
+py load_test_scenarios.py
+```
+
+Review and manually edit the `CAMERAS` coordinates in
+`backend/load_test_scenarios.py` before running if your sensor locations change.
+The default menu lets you select Set 1, Set 2, or Set 3. To preselect a set while
+still requiring upload confirmation, use `py load_test_scenarios.py --scenario 2`.
+Press Enter at the menu or enter anything other than `UPLOAD` at confirmation
+to cancel without changing MongoDB.
+
+Set 1 marks the existing camera and CCTV 3 ALERT; Set 2 marks those two DANGER,
+CCTV 2 and 4 ALERT, and CCTV 5 SAFE; Set 3 marks CCTV 1 through 4 DANGER and
+CCTV 5 SAFE.
+
+The loader reads `MONGODB_URI`, `MONGODB_DB`, and `MONGODB_COLLECTION` from
+`backend/.env` (or the process environment). Each run updates matching sensor
+records or inserts missing ones; it does not delete records or replace existing
+camera configuration.
+
+It uses 0.05 m for SAFE, 0.20 m for ALERT, and 0.50 m for DANGER, in accordance
+with the app's green, orange, and red status colors. GeoJSON coordinates are
+stored as `[longitude, latitude]`.
+
 ## Project Structure
 
 ```text

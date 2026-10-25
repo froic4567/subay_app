@@ -25,6 +25,15 @@ const client = new MongoClient(uri, {
 // Explicitly target your database and collection names
 const DB_NAME = process.env.MONGODB_DB || 'CCTVs';
 const COLLECTION_NAME = process.env.MONGODB_COLLECTION || 'cctv data';
+const MOBILE_CCTV_PROJECTION = {
+  _id: 1,
+  status: 1,
+  water_level: 1,
+  location: 1,
+  timestamp: 1,
+  location_label: 1,
+  location_name: 1,
+};
 
 let dbCollection = null;
 let isConnecting = false;
@@ -97,7 +106,9 @@ app.get('/api/cctv', async (req, res) => {
       return res.json([]);
     }
 
-    const documents = await dbCollection.find({}).toArray();
+    const documents = await dbCollection
+      .find({}, { projection: MOBILE_CCTV_PROJECTION })
+      .toArray();
     res.json(sanitizeDocs(documents));
   } catch (err) {
     console.error('Error fetching CCTV data:', err.message);
@@ -105,7 +116,7 @@ app.get('/api/cctv', async (req, res) => {
   }
 });
 
-// GET CCTV data filtered by status (danger, alert, safe)
+// GET CCTV data filtered by status (danger, alert, safe), regardless of case
 app.get('/api/cctv/:status', async (req, res) => {
   try {
     if (!dbCollection) {
@@ -113,7 +124,12 @@ app.get('/api/cctv/:status', async (req, res) => {
     }
 
     const status = req.params.status.toLowerCase();
-    const documents = await dbCollection.find({ status: status }).toArray();
+    const documents = await dbCollection
+      .find(
+        { status: { $in: [status, status.toUpperCase()] } },
+        { projection: MOBILE_CCTV_PROJECTION }
+      )
+      .toArray();
     res.json(sanitizeDocs(documents));
   } catch (err) {
     console.error('Error fetching CCTV data by status:', err.message);
@@ -129,9 +145,12 @@ app.get('/api/alerts', async (req, res) => {
       return res.json([]);
     }
 
-    const documents = await dbCollection.find({
-      status: { $in: ['alert', 'danger'] }
-    }).toArray();
+    const documents = await dbCollection
+      .find(
+        { status: { $in: ['alert', 'danger', 'ALERT', 'DANGER'] } },
+        { projection: MOBILE_CCTV_PROJECTION }
+      )
+      .toArray();
 
     // Sort by timestamp descending (newest first)
     documents.sort((a, b) => {

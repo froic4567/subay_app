@@ -30,11 +30,9 @@ class VehicleType {
 
 // Thresholds based on typical vehicle ground clearance + safety margin
 const _vehicleTypes = [
-  VehicleType(name: 'Bicycle',    icon: Icons.pedal_bike,        maxPassableHeight: 0.15),
-  VehicleType(name: 'Motorcycle', icon: Icons.two_wheeler,       maxPassableHeight: 0.25),
-  VehicleType(name: 'Sedan / Car',icon: Icons.directions_car,    maxPassableHeight: 0.40),
-  VehicleType(name: 'SUV / Van',  icon: Icons.airport_shuttle,   maxPassableHeight: 0.65),
-  VehicleType(name: 'Truck / Bus',icon: Icons.local_shipping,    maxPassableHeight: 0.90),
+  VehicleType(name: 'Light Vehicle',  icon: Icons.directions_car,   maxPassableHeight: 0.15),
+  VehicleType(name: 'Medium Vehicle', icon: Icons.airport_shuttle, maxPassableHeight: 0.25),
+  VehicleType(name: 'Heavy Vehicle',  icon: Icons.local_shipping,  maxPassableHeight: 0.65),
 ];
 
 // ── Data model ────────────────────────────────────────────────────────────────

@@ -28,9 +28,9 @@ class NotificationItem {
   /// Left border + dot color
   Color get statusColor {
     switch (status) {
-      case 'DANGER': return const Color(0xFFE53935);
-      case 'ALERT':  return const Color(0xFFFF9800);
-      default:       return const Color(0xFF43A047);
+      case 'DANGER': return AppColors.danger;
+      case 'ALERT':  return AppColors.alert;
+      default:       return AppColors.normal;
     }
   }
 

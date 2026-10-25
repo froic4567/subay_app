@@ -50,11 +50,12 @@ This app has no admin role, user-management screen, or camera-configuration scre
 
 ### 4.4 Flood-Aware Routing
 
-- The user must be able to choose a vehicle type — bicycle, motorcycle, sedan/car, SUV/van, or truck/bus — each with a fixed maximum safe water depth (0.15 m, 0.25 m, 0.40 m, 0.65 m, and 0.90 m respectively).
+- The user must be able to choose a vehicle class — Light Vehicle, Medium Vehicle, or Heavy Vehicle — with maximum passable water depths of 0.15 m, 0.25 m, and 0.65 m respectively.
 - Given an origin and destination, the app must compute a route using Dijkstra's algorithm over a graph built from multiple OSRM candidate routes plus generated detour waypoints around flood points, with live flood nodes from the database merged in as graph constraints.
 - A flood hazard's effect on the graph is not limited to the single OSRM vertex nearest the camera's coordinate: candidate polylines are densified to ~20 m spacing and a hazard's block/penalty propagates up to ~200 m of arc length in both directions from its nearest point on the road (`RoutePlanner._computeVertexHazards`), so long, sparsely-vertexed straight roads are treated as affected along their whole flooded stretch rather than only at the exact camera point.
 - Merging different OSRM candidate routes into one graph only cross-links two candidates' points when at least one is within a hazard's affected zone (`RoutePlanner._addCrossLinks`); this keeps a candidate a single coherent road elsewhere, avoiding unnecessary turns/detours that a distance-only cross-link (regardless of hazard proximity) would otherwise allow.
 - DANGER points must always be treated as impassable; ALERT points must be passable only when the selected vehicle's water-level tolerance covers the reported depth, and are penalized in path weight even when passable.
+- While navigation is active, flood-triggered route recalculations must start from the latest available user GPS position and retain the selected destination; before navigation, route calculations use the selected origin.
 - If no safe path exists, the app must fall back to the primary OSRM route and warn the user rather than failing silently.
 - Routing must record performance and correctness metrics (path latency, database/OSRM fetch time, Dijkstra compute time, reroute behavior) for evaluation purposes.
 
@@ -72,14 +73,14 @@ The app is fully database-driven for flood data: if the backend or MongoDB is un
 
 ### CCTV / flood document (as returned by the backend)
 
-- `status`: `"danger"` | `"alert"` | `"safe"` (lowercase from the API; the routing layer normalizes to uppercase `DANGER` / `ALERT` / `SAFE`/`NORMAL`)
+- `status`: `"danger"` | `"alert"` | `"safe"` (the backend's filtered endpoints accept lowercase or uppercase stored values; the routing layer normalizes to uppercase `DANGER` / `ALERT` / `SAFE`/`NORMAL`)
 - `water_level`: number, meters
 - `location`: `{ type: "Point", coordinates: [lng, lat] }` (GeoJSON)
 - `timestamp`: ISO date string
 
 ### Compatibility Note
 
-- **Backend compatibility:** The backend now converts MongoDB `_id` values to string when returning API responses so the mobile app can reliably consume document identifiers. The mobile client is compatible with the expanded document structure (additional fields like `hsv_thresholds`, `roi_config`, `stream_config`, and `last_evaluation` are ignored by the app and do not affect routing or map rendering).
+- **Backend compatibility:** The backend converts MongoDB `_id` values to strings and returns only fields consumed by the mobile app (`_id`, `status`, `water_level`, `location`, `timestamp`, and optional location labels). Camera configuration and evaluation metadata remain in MongoDB but are not sent to mobile clients.
 
 ### RouteNode (internal routing graph node, `lib/services/route_planner.dart`)
 
@@ -91,7 +92,7 @@ The app is fully database-driven for flood data: if the backend or MongoDB is un
 
 ### VehicleType (`lib/services/route_planner.dart`)
 
-- `bicycle`, `motorcycle`, `sedan`, `suv`, `truck`, each with a `maxWaterLevelM` tolerance used to decide whether an ALERT node is passable.
+- `light`, `medium`, and `heavy`, each with a `maxWaterLevelM` tolerance of 0.15 m, 0.25 m, and 0.65 m respectively, used to decide whether an ALERT node is passable.
 
 ## 6. Visual and Interaction Requirements
 

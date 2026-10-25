@@ -38,7 +38,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
   bool _isRouting = false;
   LatLng? _originLatLng;
   LatLng? _destLatLng;
-  VehicleType _selectedVehicleType = VehicleType.sedan;
+  VehicleType _selectedVehicleType = VehicleType.light;
   RoutePlanResult? _routePlanResult;
   bool _pointerInteractionsEnabled = false;
 
@@ -407,7 +407,16 @@ class _RoutingScreenState extends State<RoutingScreen> {
   }
 
   Future<void> _buildRoute() async {
-    final origin = _originLatLng ?? _defaultLocation;
+    final livePosition = _currentPosition;
+    if (_navigationStarted && livePosition == null) {
+      _showLocationMessage(
+        'Waiting for your current location before updating the route.',
+      );
+      return;
+    }
+    final origin = _navigationStarted
+        ? livePosition!
+        : (_originLatLng ?? _defaultLocation);
     final destination = _destLatLng ?? _defaultLocation;
 
     if (origin.latitude == destination.latitude && origin.longitude == destination.longitude) {
@@ -507,7 +516,11 @@ class _RoutingScreenState extends State<RoutingScreen> {
   Future<void> _checkForReroute() async {
     if (_routePlanResult == null) return;
 
-    final origin = _originLatLng ?? _defaultLocation;
+    final livePosition = _currentPosition;
+    if (_navigationStarted && livePosition == null) return;
+    final origin = _navigationStarted
+        ? livePosition!
+        : (_originLatLng ?? _defaultLocation);
     final destination = _destLatLng ?? _defaultLocation;
     if (origin.latitude == destination.latitude &&
         origin.longitude == destination.longitude) {
@@ -752,10 +765,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
                                   strokeWidth: 5.0,
                                   color: (() {
                                     final status = (cctv['status'] as String).toLowerCase();
-                                    final water = (cctv['water_level'] as num?)?.toDouble() ?? 0.0;
-                                    // Vehicle-specific impassability: if ALERT and water > vehicle limit, treat as blocked
                                     if (status == 'danger') return AppColors.danger;
-                                    if (status == 'alert' && water > _selectedVehicleType.maxWaterLevelM) return AppColors.danger;
                                     if (status == 'alert') return AppColors.alert;
                                     return AppColors.normal;
                                   })(),
@@ -1246,6 +1256,10 @@ class _RoutingScreenState extends State<RoutingScreen> {
                                 onChanged: (value) {
                                   if (value != null) {
                                     setState(() => _selectedVehicleType = value);
+                                    if (_routePlanResult != null &&
+                                        _destLatLng != null) {
+                                      _buildRoute();
+                                    }
                                   }
                                 },
                               ),
