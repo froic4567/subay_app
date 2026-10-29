@@ -5,6 +5,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 import '../services/cctv_service.dart';
 import '../services/geocoding_service.dart';
+import '../services/geo_utils.dart';
 import '../services/location_service.dart';
 import '../services/route_planner.dart';
 import '../services/road_segment_service.dart';
@@ -38,6 +39,12 @@ class _RoutingScreenState extends State<RoutingScreen> {
   bool _isRouting = false;
   LatLng? _originLatLng;
   LatLng? _destLatLng;
+  /// True when the origin was explicitly set with "Use current location".
+  /// In that case the route follows the live GPS position; otherwise it keeps
+  /// the place the user picked, even after navigation starts.
+  bool _originIsCurrentLocation = false;
+  /// Guards against overlapping "use current location" requests.
+  bool _resolvingCurrentLocation = false;
   VehicleType _selectedVehicleType = VehicleType.light;
   RoutePlanResult? _routePlanResult;
   bool _pointerInteractionsEnabled = false;
@@ -64,10 +71,16 @@ class _RoutingScreenState extends State<RoutingScreen> {
   bool _suppressOriginSearch = false;
   bool _suppressDestSearch = false;
 
-  // GPS tracking for navigation
-  Stream<Position>? _positionStream;
+  // GPS tracking for navigation and the always-visible location marker
   StreamSubscription<Position>? _positionSub;
   LatLng? _currentPosition;
+
+  // Google-Maps-style progress: while navigating, only the road still ahead
+  // of the user is drawn. `_routeProgressSegment` is the last matched segment
+  // and only moves forward so passed road never reappears.
+  static const double _offRouteThresholdM = 60.0;
+  int _routeProgressSegment = 0;
+  List<LatLng>? _remainingRoute;
 
   // Default location (Cagayan de Oro, Philippines)
   final LatLng _defaultLocation = LatLng(8.4866, 124.6500);
@@ -86,6 +99,10 @@ class _RoutingScreenState extends State<RoutingScreen> {
 
     // Fetch CCTV data from backend API
     _loadCctvData();
+
+    // Keep the "my location" marker live even before navigation starts, so
+    // switching from the Map tab to the Routing tab shows the user's position.
+    _startLocationTracking();
 
     // Pre-fill destination when coming from MapScreen
     if (widget.initialDestination != null) {
@@ -106,7 +123,6 @@ class _RoutingScreenState extends State<RoutingScreen> {
     _destDebounce?.cancel();
     _rerouteTimer?.cancel();
     _positionSub?.cancel();
-    _positionStream = null;
     _destController.dispose();
     _originController.dispose();
     _mapController.dispose();
@@ -217,6 +233,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
     _suppressOriginSearch = true;
     setState(() {
       _originLatLng = result.latLng;
+      _originIsCurrentLocation = false;
       _originController.text = result.shortName;
       _originResults = [];
       _showOriginSuggestions = false;
@@ -244,7 +261,18 @@ class _RoutingScreenState extends State<RoutingScreen> {
   }
 
   Future<void> _useCurrentLocation() async {
+    if (_resolvingCurrentLocation) return;
+    _resolvingCurrentLocation = true;
     try {
+      // Leaving pin-selection mode immediately keeps the UI consistent while
+      // the GPS fix resolves and stops the confirm banner from lingering.
+      if (_selectingOrigin || _selectingDestination) {
+        setState(() {
+          _selectingOrigin = false;
+          _selectingDestination = false;
+        });
+      }
+
       final status = await LocationService.ensureAccess();
       if (status == LocationAccessStatus.serviceDisabled) {
         _showLocationMessage('Please enable location services to use your current location.');
@@ -255,29 +283,43 @@ class _RoutingScreenState extends State<RoutingScreen> {
         return;
       }
 
-      final position = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-        ),
-      );
-
+      // Prefer the latched fix from the continuous stream: it is instant and
+      // the marker is already following it, so the button always responds.
+      // Only fall back to a one-shot request (with a timeout) when the stream
+      // has not produced a position yet.
+      final point = _currentPosition ?? await _fetchOneShotPosition();
       if (!mounted) return;
+      if (point == null) {
+        _showLocationMessage('Unable to fetch your current location right now.');
+        return;
+      }
 
-      final latlng = LatLng(position.latitude, position.longitude);
       _suppressOriginSearch = true;
       setState(() {
-        _originLatLng = latlng;
+        _originLatLng = point;
+        _originIsCurrentLocation = true;
         _originController.text = 'Current location';
         _selectingOrigin = false;
         _selectingDestination = false;
+        _originResults = [];
+        _showOriginSuggestions = false;
       });
       _suppressOriginSearch = false;
-      _safeMapMove(latlng, 16);
 
-      // Reverse-geocode for a readable address label
-      final address = await GeocodingService.reverseGeocode(latlng)
+      _safeMapMove(point, 16);
+
+      // A destination may already be set (e.g. the user previewed a route
+      // from a custom origin first). Rebuild the preview so it visibly starts
+      // from the current location instead of keeping the stale route.
+      if (_destLatLng != null) {
+        await _buildRoute();
+      }
+
+      // Reverse-geocode for a readable address label. Skip if the origin moved
+      // on (another selection) while we were waiting.
+      final address = await GeocodingService.reverseGeocode(point)
           .timeout(const Duration(seconds: 5), onTimeout: () => 'Current location');
-      if (!mounted) return;
+      if (!mounted || !_originIsCurrentLocation) return;
       _suppressOriginSearch = true;
       setState(() {
         _originController.text = address;
@@ -286,6 +328,27 @@ class _RoutingScreenState extends State<RoutingScreen> {
     } catch (_) {
       if (!mounted) return;
       _showLocationMessage('Unable to fetch your current location right now.');
+    } finally {
+      _resolvingCurrentLocation = false;
+    }
+  }
+
+  /// One-shot high-accuracy fix with a timeout, falling back to the platform's
+  /// last known position so a slow GPS lock doesn't make the button dead.
+  Future<LatLng?> _fetchOneShotPosition() async {
+    try {
+      final position = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+        ),
+      ).timeout(const Duration(seconds: 8));
+      return LatLng(position.latitude, position.longitude);
+    } catch (_) {
+      try {
+        final last = await Geolocator.getLastKnownPosition();
+        if (last != null) return LatLng(last.latitude, last.longitude);
+      } catch (_) {}
+      return null;
     }
   }
 
@@ -407,16 +470,13 @@ class _RoutingScreenState extends State<RoutingScreen> {
   }
 
   Future<void> _buildRoute() async {
-    final livePosition = _currentPosition;
-    if (_navigationStarted && livePosition == null) {
+    if (_originIsCurrentLocation && _currentPosition == null) {
       _showLocationMessage(
-        'Waiting for your current location before updating the route.',
+        'Waiting for your current location before building the route.',
       );
       return;
     }
-    final origin = _navigationStarted
-        ? livePosition!
-        : (_originLatLng ?? _defaultLocation);
+    final origin = _effectiveOrigin;
     final destination = _destLatLng ?? _defaultLocation;
 
     if (origin.latitude == destination.latitude && origin.longitude == destination.longitude) {
@@ -449,6 +509,9 @@ class _RoutingScreenState extends State<RoutingScreen> {
       _routePlanResult = result;
       _routeFound = result != null;
       _isRouting = false;
+      // New geometry — restart progress tracking from its beginning.
+      _routeProgressSegment = 0;
+      _remainingRoute = null;
     });
 
     if (result != null) {
@@ -478,49 +541,141 @@ class _RoutingScreenState extends State<RoutingScreen> {
     _rerouteTimer = null;
   }
 
-  /// Starts GPS position tracking for navigation mode.
-  void _startGpsTracking() async {
+  /// Starts the single continuous position stream that feeds `_currentPosition`
+  /// (and therefore the "my location" marker). Called once from `initState`
+  /// so the marker is visible on the Routing tab without starting navigation,
+  /// and reused by `_startGpsTracking` when navigation begins.
+  Future<void> _startLocationTracking() async {
+    if (_positionSub != null) return;
     try {
-      final status = await LocationService.ensureAccess();
-      if (status != LocationAccessStatus.granted) return;
-
-      // Start listening to position updates
-      _positionStream = await LocationService.watchPosition(
+      final stream = await LocationService.watchPosition(
         accuracy: LocationAccuracy.high,
-        distanceFilter: 10, // Update every 10 meters
+        distanceFilter: 5, // Update every 5 meters
       );
+      if (stream == null || !mounted) return;
 
-      _positionSub = _positionStream?.listen((Position position) {
-        if (!mounted) return;
-        final newLatLng = LatLng(position.latitude, position.longitude);
-        setState(() {
-          _currentPosition = newLatLng;
-        });
-        // Follow the user's position on the map
-            _safeMapMove(newLatLng, _mapController.camera.zoom);
-      });
+      _positionSub = stream.listen(_onPositionUpdate);
     } catch (_) {
       // GPS tracking failed silently
     }
   }
 
-  void _stopGpsTracking() {
-    _positionSub?.cancel();
-    _positionSub = null;
-    _positionStream = null;
+  /// The origin used for routing. Honors an explicitly chosen start point;
+  /// only falls back to the live GPS fix when the user asked for "Current
+  /// location" (or hasn't picked an origin at all).
+  LatLng get _effectiveOrigin {
+    if (_originIsCurrentLocation) {
+      return _currentPosition ?? _originLatLng ?? _defaultLocation;
+    }
+    return _originLatLng ?? _currentPosition ?? _defaultLocation;
+  }
+
+  /// Point that the blue user marker represents.
+  ///
+  /// Normally this is the live GPS fix. During navigation from a pinned start,
+  /// if the device is far off the planned route (or GPS is unavailable), the
+  /// marker stays on the chosen start so it is always visible on screen
+  /// instead of disappearing outside the viewport.
+  LatLng? get _navigationUserPoint {
+    final live = _currentPosition;
+    if (!_navigationStarted) return live;
+    if (live == null) return _originLatLng;
+    if (_originIsCurrentLocation) return live;
+
+    final route = _routePlanResult?.polyline;
+    if (route == null || route.length < 2) return live;
+
+    final nearest = GeoUtils.nearestPointOnPolyline(live, route);
+    if (nearest == null || nearest.distanceM > _offRouteThresholdM) {
+      return _originLatLng ?? live;
+    }
+    return live;
+  }
+
+  void _onPositionUpdate(Position position) {
+    if (!mounted) return;
+    final newLatLng = LatLng(position.latitude, position.longitude);
+    final isFirstFix = _currentPosition == null;
     setState(() {
-      _currentPosition = null;
+      _currentPosition = newLatLng;
+      // Keep the origin marker glued to the user only while "Current
+      // location" is the chosen start and no route preview is pinned to an
+      // origin yet (after a preview, the route's start should stay put).
+      if (_originIsCurrentLocation && !_navigationStarted && _routePlanResult == null) {
+        _originLatLng = newLatLng;
+      }
+      // Chop the passed part of the route away as the user moves.
+      if (_navigationStarted && _routePlanResult != null) {
+        _remainingRoute = _trimRoute(_routePlanResult!.polyline, newLatLng);
+      }
     });
+
+    if (_navigationStarted) {
+      // Keep the marker on screen only when it represents the live position;
+      // when it falls back to a pinned start (GPS far off-route) the camera
+      // must stay on the route instead of chasing the device.
+      if (_navigationUserPoint == newLatLng) {
+        _safeMapMove(newLatLng, _mapController.camera.zoom);
+      }
+    } else if (isFirstFix && _originLatLng == null && _destLatLng == null) {
+      // First fix on an untouched routing map: center on the user so the
+      // marker is actually on screen instead of the hard-coded default.
+      _safeMapMove(newLatLng, 15);
+    }
+  }
+
+  /// Trims [route] to the portion the user has not driven yet, starting at
+  /// their projected position on the line.
+  ///
+  /// Progress is monotonic: the search starts slightly behind the last
+  /// matched segment (so GPS jitter can't re-draw passed road) but only moves
+  /// forward. When the user is far off the line, the full route is returned so
+  /// the line never gets chopped at a meaningless spot from GPS drift.
+  List<LatLng> _trimRoute(List<LatLng> route, LatLng position) {
+    if (route.length < 2) return route;
+
+    final lastSegment = route.length - 2;
+    final firstSegment = (_routeProgressSegment - 2).clamp(0, lastSegment);
+
+    var bestDistance = double.infinity;
+    var bestPoint = route[firstSegment];
+    var bestSegment = firstSegment;
+
+    for (var i = firstSegment; i <= lastSegment; i++) {
+      final nearest =
+          GeoUtils.nearestPointOnSegment(position, route[i], route[i + 1]);
+      if (nearest.distanceM < bestDistance) {
+        bestDistance = nearest.distanceM;
+        bestPoint = nearest.point;
+        bestSegment = i;
+      }
+    }
+
+    if (bestDistance > _offRouteThresholdM) return route;
+
+    _routeProgressSegment = bestSegment;
+    // The projection point itself becomes the new visible start; everything
+    // before it (already driven) is dropped.
+    return [bestPoint, ...route.skip(bestSegment + 1)];
+  }
+
+  /// Navigation needs the live position stream that already powers the marker
+  /// (see `_startLocationTracking`); this only guarantees it is running.
+  void _startGpsTracking() {
+    _startLocationTracking();
+  }
+
+  /// Stops camera-following when navigation ends. The position subscription is
+  /// intentionally kept alive so the "my location" marker stays visible.
+  void _stopGpsTracking() {
+    // No-op: marker tracking continues outside navigation.
   }
 
   Future<void> _checkForReroute() async {
     if (_routePlanResult == null) return;
 
-    final livePosition = _currentPosition;
-    if (_navigationStarted && livePosition == null) return;
-    final origin = _navigationStarted
-        ? livePosition!
-        : (_originLatLng ?? _defaultLocation);
+    if (_originIsCurrentLocation && _currentPosition == null) return;
+    final origin = _effectiveOrigin;
     final destination = _destLatLng ?? _defaultLocation;
     if (origin.latitude == destination.latitude &&
         origin.longitude == destination.longitude) {
@@ -567,6 +722,8 @@ class _RoutingScreenState extends State<RoutingScreen> {
     setState(() {
       _routePlanResult = newResult;
       _routeFound = true;
+      _routeProgressSegment = 0;
+      _remainingRoute = null;
     });
     _showRerouteSnackbar();
   }
@@ -624,7 +781,9 @@ class _RoutingScreenState extends State<RoutingScreen> {
         ),
       );
     }
-    if (_originLatLng != null) {
+    // The origin marker is hidden during navigation — the start has been
+    // passed and the live position marker takes over.
+    if (_originLatLng != null && !_navigationStarted) {
       markers.add(
         Marker(
           point: _originLatLng!,
@@ -675,11 +834,14 @@ class _RoutingScreenState extends State<RoutingScreen> {
         ),
       );
     }
-    // Current GPS position marker (shown during navigation)
-    if (_currentPosition != null) {
+    // User position marker. During navigation it falls back to the chosen
+    // start when GPS is unavailable or far off the route (e.g. navigating
+    // from a pinned location), so the marker never disappears off-screen.
+    final userPoint = _navigationUserPoint;
+    if (userPoint != null) {
       markers.add(
         Marker(
-          point: _currentPosition!,
+          point: userPoint,
           width: 40,
           height: 40,
           child: Stack(
@@ -714,7 +876,11 @@ class _RoutingScreenState extends State<RoutingScreen> {
       );
     }
 
-    final routePolyline = _routePlanResult?.polyline ?? const <LatLng>[];
+    final fullRoutePolyline = _routePlanResult?.polyline ?? const <LatLng>[];
+    // While navigating, show only the remaining road ahead of the user.
+    final routePolyline = _navigationStarted
+        ? (_remainingRoute ?? fullRoutePolyline)
+        : fullRoutePolyline;
 
     return IgnorePointer(
       ignoring: !_pointerInteractionsEnabled,
@@ -854,6 +1020,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
                   setState(() {
                     if (wasSelectingOrigin) {
                       _originLatLng = center;
+                      _originIsCurrentLocation = false;
                       _originController.text = 'Pinned Location';
                       _selectingOrigin = false;
                     } else {
@@ -1039,6 +1206,9 @@ class _RoutingScreenState extends State<RoutingScreen> {
                         setState(() {
                           _navigationStarted = false;
                           _routeFound = true;
+                          // Show the complete route again in preview mode.
+                          _routeProgressSegment = 0;
+                          _remainingRoute = null;
                         });
                         // Stop GPS tracking
                         _stopGpsTracking();
@@ -1396,6 +1566,9 @@ class _RoutingScreenState extends State<RoutingScreen> {
                       setState(() {
                         _navigationStarted = true;
                         _routeFound = false;
+                        // Start trimming the route from the beginning.
+                        _routeProgressSegment = 0;
+                        _remainingRoute = null;
                       });
                       print('[NavigationUI] Layout ready');
 
@@ -1403,7 +1576,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
                       Future.delayed(const Duration(milliseconds: 50), () {
                         if (!mounted) return;
                         print('[NavigationUI] Starting camera/GPS');
-                        final focusPoint = _originLatLng ?? _defaultLocation;
+                        final focusPoint = _effectiveOrigin;
                         _safeMapMove(focusPoint, 17);
                         _startGpsTracking();
                       });
