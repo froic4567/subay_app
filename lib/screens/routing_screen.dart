@@ -87,6 +87,46 @@ class _RoutingScreenState extends State<RoutingScreen> {
   int _routeProgressSegment = 0;
   List<LatLng>? _remainingRoute;
 
+  /// Length of a polyline in kilometres.
+  double _lineLengthKm(List<LatLng> line) {
+    var meters = 0.0;
+    for (var i = 0; i < line.length - 1; i++) {
+      meters += GeoUtils.haversineM(line[i], line[i + 1]);
+    }
+    return meters / 1000.0;
+  }
+
+  /// Distance shown in the navigation bar: the part still ahead once
+  /// navigation has started, otherwise the full planned route.
+  double get _displayDistanceKm {
+    final result = _routePlanResult;
+    if (result == null) return 0;
+    if (_navigationStarted && _remainingRoute != null) {
+      return _lineLengthKm(_remainingRoute!);
+    }
+    return result.distanceKm;
+  }
+
+  /// ETA shown in the navigation bar, recomputed from the remaining distance
+  /// so it counts down as the user moves along the route.
+  double get _displayDurationMinutes {
+    final result = _routePlanResult;
+    if (result == null) return 0;
+    if (_navigationStarted &&
+        _remainingRoute != null &&
+        result.distanceKm > 0 &&
+        result.durationMinutes > 0) {
+      final fraction =
+          (_displayDistanceKm / result.distanceKm).clamp(0.0, 1.0);
+      return result.durationMinutes * fraction;
+    }
+    return result.durationMinutes;
+  }
+
+  String get _displayEtaText => _routePlanResult == null
+      ? '--'
+      : RoutePlanResult.formatEta(_displayDurationMinutes);
+
   // Default location (Cagayan de Oro, Philippines)
   final LatLng _defaultLocation = LatLng(8.4866, 124.6500);
 
@@ -1160,7 +1200,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Text(
-                          _routePlanResult?.etaText ?? '--',
+                          _displayEtaText,
                           style: TextStyle(
                             fontSize: 24,
                             fontWeight: FontWeight.w800,
@@ -1172,7 +1212,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
                         const SizedBox(height: 2),
                         Text(
                           _routePlanResult != null
-                              ? '${_routePlanResult!.distanceKm.toStringAsFixed(1)} km'
+                              ? '${_displayDistanceKm.toStringAsFixed(1)} km'
                               : '',
                           style: TextStyle(
                             fontSize: 12,

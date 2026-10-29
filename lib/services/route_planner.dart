@@ -789,12 +789,19 @@ class RoutePlanner {
     
     final chosenDistanceM = _sumMeters(routePoints);
 
-    // Estimate duration using the primary candidate's average speed.
+    // OSRM's public demo has no live traffic data, so its duration is a
+    // free-flow estimate (e.g. ~7 min for a 5.4 km city trip, while Google
+    // Maps shows ~20 min for the same drive). Apply an urban traffic factor
+    // and clamp the resulting speed so the ETA reflects typical city driving
+    // instead of empty-road speed.
     final primary = routes.first;
-    final avgSpeed = primary.durationSeconds > 0
+    final osrmSpeedMps = primary.durationSeconds > 0 &&
+            primary.distanceMeters > 0
         ? primary.distanceMeters / primary.durationSeconds
         : 8.33; // ~30 km/h fallback
-    final durationSec = avgSpeed > 0 ? chosenDistanceM / avgSpeed : 0.0;
+    const trafficFactor = 2.8;
+    final avgSpeedMps = (osrmSpeedMps / trafficFactor).clamp(3.5, 16.0);
+    final durationSec = chosenDistanceM / avgSpeedMps;
     final distanceKm = chosenDistanceM / 1000.0;
     final durationMinutes = durationSec / 60.0;
 
