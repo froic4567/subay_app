@@ -39,4 +39,16 @@ class AppColors {
 
   // Camera-covered road segment outline (Map tab)
   static const Color segmentOutline = Color(0xFF2A2A2A);
+
+  // ── Dark mode — deep navy palette ─────────────────────────────────────
+  // Used by the dark theme and any screen that needs explicit dark surfaces
+  // (profile cards, routing panels, navigation bars, notification cards).
+  static const Color darkBackground    = Color(0xFF060E1A);
+  static const Color darkSurface       = Color(0xFF0B1929);
+  static const Color darkSurfaceMuted  = Color(0xFF10243B);
+  static const Color darkBorder        = Color(0xFF1D3E63);
+  static const Color darkTextPrimary   = Color(0xFFF2F7FF);
+  static const Color darkTextSecondary = Color(0xFFC3D2E4);
+  static const Color darkTextMuted     = Color(0xFF8DA4BF);
+  static const Color darkAccent        = Color(0xFF2F9BFF);
 }

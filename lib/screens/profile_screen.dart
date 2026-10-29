@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import '../services/auth_service.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_radius.dart';
+import '../theme/app_shadows.dart';
+import '../theme/theme_controller.dart';
 
 class ProfileScreen extends StatelessWidget {
   const ProfileScreen({super.key});
@@ -10,7 +12,8 @@ class ProfileScreen extends StatelessWidget {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
+        shape:
+            RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
         titlePadding: const EdgeInsets.fromLTRB(20, 20, 20, 6),
         contentPadding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
         title: const Text(
@@ -19,7 +22,7 @@ class ProfileScreen extends StatelessWidget {
         ),
         content: const Text(
           'Are you sure you want to log out?',
-          style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
+          style: TextStyle(fontSize: 13),
         ),
         actions: [
           TextButton(
@@ -58,11 +61,17 @@ class ProfileScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     final user = AuthService.instance.currentUser;
     final displayName = user?.displayName ?? 'FloodSight User';
     final email = user?.email ?? 'Not signed in';
     final photoUrl = user?.photoUrl;
-    final initial = displayName.isNotEmpty ? displayName[0].toUpperCase() : 'U';
+
+    final textPrimary =
+        isDark ? AppColors.darkTextPrimary : AppColors.textPrimary;
+    final textMuted = isDark ? AppColors.darkTextMuted : AppColors.textMuted;
+    final surface = isDark ? AppColors.darkSurface : Colors.white;
+    final border = isDark ? AppColors.darkBorder : AppColors.border;
 
     return Scaffold(
       appBar: AppBar(
@@ -70,53 +79,116 @@ class ProfileScreen extends StatelessWidget {
         automaticallyImplyLeading: false,
         actions: [
           IconButton(
-            icon: const Icon(Icons.settings_outlined, color: Colors.white),
-            onPressed: () {},
+            tooltip: isDark ? 'Switch to light mode' : 'Switch to dark mode',
+            icon: Icon(
+              isDark ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
+              color: Colors.white,
+            ),
+            onPressed: ThemeController.toggle,
           ),
         ],
       ),
       body: Padding(
-        padding: const EdgeInsets.all(20),
+        padding: const EdgeInsets.fromLTRB(20, 28, 20, 16),
         child: Column(
           children: [
-            const SizedBox(height: 24),
-            CircleAvatar(
-              radius: 38,
-              backgroundColor: AppColors.primary,
-              backgroundImage: photoUrl != null ? NetworkImage(photoUrl) : null,
-              child: photoUrl == null
-                  ? Text(
-                      initial,
-                      style: const TextStyle(
-                        fontSize: 30,
-                        fontWeight: FontWeight.w700,
-                        color: Colors.white,
-                      ),
-                    )
-                  : null,
+            // ── Avatar ────────────────────────────────────────────────────
+            Container(
+              padding: const EdgeInsets.all(3),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: isDark ? AppColors.darkSurfaceMuted : Colors.white,
+                boxShadow: [
+                  BoxShadow(
+                    color: AppColors.primary.withValues(alpha: 0.22),
+                    blurRadius: 18,
+                    offset: const Offset(0, 6),
+                  ),
+                ],
+              ),
+              child: ClipOval(
+                child: Container(
+                  width: 86,
+                  height: 86,
+                  color: AppColors.primary,
+                  child: photoUrl != null
+                      ? Image.network(
+                          photoUrl,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, _, _) => const Icon(
+                            Icons.person_rounded,
+                            color: Colors.white,
+                            size: 52,
+                          ),
+                        )
+                      : const Icon(
+                          Icons.person_rounded,
+                          color: Colors.white,
+                          size: 52,
+                        ),
+                ),
+              ),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 14),
+
+            // ── Identity ──────────────────────────────────────────────────
             Text(
               displayName,
-              style: const TextStyle(
-                fontSize: 18,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 19,
                 fontWeight: FontWeight.w700,
-                color: AppColors.textPrimary,
+                color: textPrimary,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              email,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w500,
+                color: textMuted,
               ),
             ),
             const SizedBox(height: 28),
-            _ProfileField(
-              label: 'Email',
-              value: email,
-              onTap: () {},
+
+            // ── Profile details card ──────────────────────────────────────
+            Container(
+              clipBehavior: Clip.antiAlias,
+              decoration: BoxDecoration(
+                color: surface,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: border),
+                boxShadow: isDark ? null : AppShadows.base,
+              ),
+              child: Column(
+                children: [
+                  _ProfileField(
+                    icon: Icons.mail_outline_rounded,
+                    label: 'Email',
+                    value: email,
+                    onTap: () {},
+                  ),
+                  Divider(
+                    height: 1,
+                    thickness: 1,
+                    indent: 68,
+                    color: border,
+                  ),
+                  _ProfileField(
+                    icon: Icons.person_outline_rounded,
+                    label: 'Name',
+                    value: displayName,
+                    onTap: () {},
+                  ),
+                ],
+              ),
             ),
-            const SizedBox(height: 10),
-            _ProfileField(
-              label: 'Name',
-              value: displayName,
-              onTap: () {},
-            ),
+
             const Spacer(),
+
+            // ── Logout ────────────────────────────────────────────────────
             SizedBox(
               width: double.infinity,
               child: OutlinedButton.icon(
@@ -130,7 +202,8 @@ class ProfileScreen extends StatelessWidget {
                   foregroundColor: AppColors.danger,
                   side: const BorderSide(color: AppColors.danger, width: 1.5),
                   shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(AppRadius.md)),
+                    borderRadius: BorderRadius.circular(AppRadius.md),
+                  ),
                   padding: const EdgeInsets.symmetric(vertical: 13),
                 ),
               ),
@@ -144,11 +217,13 @@ class ProfileScreen extends StatelessWidget {
 }
 
 class _ProfileField extends StatelessWidget {
+  final IconData icon;
   final String label;
   final String value;
   final VoidCallback onTap;
 
   const _ProfileField({
+    required this.icon,
     required this.label,
     required this.value,
     required this.onTap,
@@ -156,37 +231,67 @@ class _ProfileField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(AppRadius.lg),
-          border: Border.all(color: AppColors.border),
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(label,
-                    style: const TextStyle(
-                      fontSize: 11, color: AppColors.textMuted)),
-                  const SizedBox(height: 2),
-                  Text(value,
-                    style: const TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500,
-                      color: AppColors.textPrimary,
-                    )),
-                ],
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final valueColor =
+        isDark ? AppColors.darkTextPrimary : AppColors.textPrimary;
+    final labelColor = isDark ? AppColors.darkTextMuted : AppColors.textMuted;
+    final iconBg = isDark
+        ? AppColors.darkSurfaceMuted
+        : AppColors.primaryLight;
+    final iconColor = isDark ? AppColors.darkAccent : AppColors.primary;
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          child: Row(
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: iconBg,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(icon, color: iconColor, size: 20),
               ),
-            ),
-            const Icon(Icons.chevron_right,
-              color: AppColors.textDisabled, size: 20),
-          ],
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      label,
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w500,
+                        color: labelColor,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      value,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w600,
+                        color: valueColor,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(
+                Icons.chevron_right_rounded,
+                color: labelColor.withValues(alpha: 0.7),
+                size: 22,
+              ),
+            ],
+          ),
         ),
       ),
     );

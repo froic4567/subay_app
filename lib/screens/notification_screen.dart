@@ -157,6 +157,7 @@ class _NotificationScreenState extends State<NotificationScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Scaffold(
       appBar: AppBar(
         title: const Text('Notification+'),
@@ -214,8 +215,14 @@ class _NotificationScreenState extends State<NotificationScreen> {
                             const Icon(Icons.notifications_none,
                                 size: 48, color: AppColors.textMuted),
                             const SizedBox(height: 12),
-                            const Text('No notifications',
-                              style: TextStyle(color: AppColors.textMuted, fontSize: 14)),
+                            Text('No notifications',
+                              style: TextStyle(
+                                color: isDark
+                                    ? AppColors.darkTextMuted
+                                    : AppColors.textMuted,
+                                fontSize: 14,
+                              ),
+                            ),
                           ],
                         ),
                       )
@@ -253,16 +260,21 @@ class _FilterTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
         padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 7),
         decoration: BoxDecoration(
-          color: selected ? AppColors.primary : Colors.white,
+          color: selected
+              ? AppColors.primary
+              : (isDark ? AppColors.darkSurfaceMuted : Colors.white),
           borderRadius: BorderRadius.circular(AppRadius.full),
           border: Border.all(
-            color: selected ? AppColors.primary : const Color(0xFFE0E0E0),
+            color: selected
+                ? AppColors.primary
+                : (isDark ? AppColors.darkBorder : const Color(0xFFE0E0E0)),
             width: 1.2,
           ),
         ),
@@ -271,7 +283,9 @@ class _FilterTab extends StatelessWidget {
           style: TextStyle(
             fontSize: 13,
             fontWeight: FontWeight.w600,
-            color: selected ? Colors.white : AppColors.textMuted,
+            color: selected
+                ? Colors.white
+                : (isDark ? AppColors.darkTextMuted : AppColors.textMuted),
           ),
         ),
       ),
@@ -287,12 +301,16 @@ class _NotificationCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Container(
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: isDark ? AppColors.darkSurface : Colors.white,
         borderRadius: BorderRadius.circular(AppRadius.xl),
-        border: Border.all(color: const Color(0xFFE8E8E8), width: 1),
-        boxShadow: AppShadows.sm,
+        border: Border.all(
+          color: isDark ? AppColors.darkBorder : const Color(0xFFE8E8E8),
+          width: 1,
+        ),
+        boxShadow: isDark ? null : AppShadows.sm,
       ),
       clipBehavior: Clip.antiAlias,
       child: Row(
@@ -317,17 +335,21 @@ class _NotificationCard extends StatelessWidget {
                     children: [
                       Text(
                         item.title,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 14,
                           fontWeight: FontWeight.w700,
-                          color: Color(0xFF1A1A1A),
+                          color: isDark
+                              ? AppColors.darkTextPrimary
+                              : const Color(0xFF1A1A1A),
                         ),
                       ),
                       Text(
                         item.timeAgo,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 11,
-                          color: Color(0xFF999999),
+                          color: isDark
+                              ? AppColors.darkTextMuted
+                              : const Color(0xFF999999),
                         ),
                       ),
                     ],
@@ -337,15 +359,20 @@ class _NotificationCard extends StatelessWidget {
                   // Location
                   Row(
                     children: [
-                      const Icon(Icons.location_on_outlined,
-                          size: 14, color: Color(0xFF999999)),
+                      Icon(Icons.location_on_outlined,
+                          size: 14,
+                          color: isDark
+                              ? AppColors.darkTextMuted
+                              : const Color(0xFF999999)),
                       const SizedBox(width: 4),
                       Expanded(
                         child: Text(
                           item.location,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 12,
-                            color: Color(0xFF666666),
+                            color: isDark
+                                ? AppColors.darkTextSecondary
+                                : const Color(0xFF666666),
                           ),
                         ),
                       ),
@@ -363,16 +390,20 @@ class _NotificationCard extends StatelessWidget {
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                         decoration: BoxDecoration(
-                          color: const Color(0xFFE3F2FD),
+                          color: isDark
+                              ? AppColors.darkSurfaceMuted
+                              : const Color(0xFFE3F2FD),
                           borderRadius: BorderRadius.circular(AppRadius.sm),
                         ),
                         child: Text(
                           'Flood Height: ${item.floodHeight.toStringAsFixed(2)} m',
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 11,
                             fontWeight: FontWeight.w600,
-                            color: Color(0xFF1565C0),
-                            fontFeatures: [FontFeature.tabularFigures()],
+                            color: isDark
+                                ? AppColors.darkAccent
+                                : const Color(0xFF1565C0),
+                            fontFeatures: const [FontFeature.tabularFigures()],
                           ),
                         ),
                       ),

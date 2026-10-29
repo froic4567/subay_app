@@ -35,6 +35,7 @@ class _HomeScreenState extends State<HomeScreen> {
       RoutingScreen(
         initialDestination: _pendingDestination,
         initialDestinationName: _pendingDestinationName,
+        onBack: () => setState(() => _currentIndex = 0),
       ),
       const NotificationScreen(),
       const ProfileScreen(),

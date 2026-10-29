@@ -294,13 +294,14 @@ class _MapScreenState extends State<MapScreen> {
 
   void _showSearchedLocationSheet() {
     if (_searchedLocation == null) return;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
       builder: (_) => Container(
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: isDark ? AppColors.darkSurface : Colors.white,
           borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xxl)),
         ),
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 28),
@@ -313,7 +314,7 @@ class _MapScreenState extends State<MapScreen> {
                 width: 32,
                 height: 3,
                 decoration: BoxDecoration(
-                  color: const Color(0xFFDDDDDD),
+                  color: isDark ? AppColors.darkBorder : const Color(0xFFDDDDDD),
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
@@ -333,10 +334,12 @@ class _MapScreenState extends State<MapScreen> {
                 Flexible(
                   child: Text(
                     _searchedName ?? 'Searched Location',
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 15,
                       fontWeight: FontWeight.w700,
-                      color: AppColors.textPrimary,
+                      color: isDark
+                          ? AppColors.darkTextPrimary
+                          : AppColors.textPrimary,
                     ),
                   ),
                 ),
@@ -346,7 +349,10 @@ class _MapScreenState extends State<MapScreen> {
             Text(
               'Lat: ${_searchedLocation!.latitude.toStringAsFixed(5)}, '
               'Lng: ${_searchedLocation!.longitude.toStringAsFixed(5)}',
-              style: const TextStyle(fontSize: 11, color: AppColors.textMuted),
+              style: TextStyle(
+                fontSize: 11,
+                color: isDark ? AppColors.darkTextMuted : AppColors.textMuted,
+              ),
             ),
             const SizedBox(height: 14),
             SizedBox(
@@ -621,288 +627,450 @@ class _MapScreenState extends State<MapScreen> {
   @override
   Widget build(BuildContext context) {
     final topPad = MediaQuery.of(context).padding.top;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
 
     return Scaffold(
-      body: Stack(
+      body: Column(
         children: [
-
-          // ── MAP ───────────────────────────────────────────────────────────
-          FlutterMap(
-            mapController: _mapController,
-            options: const MapOptions(
-              initialCenter: _cdoCenter,
-              initialZoom: 14.5,
-              minZoom: 10,
-              maxZoom: 19,
-            ),
-            children: [
-              TileLayer(
-                urlTemplate:
-                    'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                userAgentPackageName: 'com.subay.app',
-                maxZoom: 19,
-              ),
-              if (_roadSegments.isNotEmpty) ...[
-                PolylineLayer(polylines: _buildSegmentOutlinePolylines()),
-                PolylineLayer(polylines: _buildSegmentColorPolylines()),
-              ],
-              MarkerLayer(markers: _buildMarkers()),
-            ],
+          // ── APP HEADER ─────────────────────────────────────────────────
+          _MapHeader(
+            topPad: topPad,
+            onSearchTap: () => _searchFocus.requestFocus(),
           ),
 
-          // ── SEARCH BAR ────────────────────────────────────────────────────
-          Positioned(
-            top: topPad + 8,
-            left: 12,
-            right: 12,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
+          // ── MAP ────────────────────────────────────────────────────────
+          Expanded(
+            child: Stack(
               children: [
-                Container(
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(AppRadius.lg),
-                    boxShadow: AppShadows.base,
-                  ),
-                  clipBehavior: Clip.antiAlias,
-                  child: TextField(
-                    controller: _searchController,
-                    focusNode: _searchFocus,
-                    onTap: () {
-                      if (_searchController.text.isNotEmpty) {
-                        setState(() => _showSuggestions = true);
-                      }
-                    },
-                    decoration: InputDecoration(
-                      hintText: 'Search a place',
-                      hintStyle:
-                          const TextStyle(color: AppColors.textMuted, fontSize: 14),
-                      prefixIcon: const Icon(Icons.search,
-                          color: AppColors.textMuted, size: 20),
-                      suffixIcon: _isSearching
-                          ? const Padding(
-                              padding: EdgeInsets.all(12),
-                              child: SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: AppColors.primary,
-                                ),
-                              ),
-                            )
-                          : (_searchController.text.isNotEmpty
-                              ? IconButton(
-                                  icon: const Icon(Icons.close,
-                                      color: AppColors.textMuted, size: 18),
-                                  onPressed: () {
-                                    _searchController.clear();
-                                    setState(() {
-                                      _searchedLocation = null;
-                                      _searchedName = null;
-                                      _showSuggestions = false;
-                                    });
-                                  },
-                                )
-                              : null),
-                      border: InputBorder.none,
-                      contentPadding: const EdgeInsets.symmetric(vertical: 13),
-                      fillColor: Colors.white,
-                      filled: true,
+                Positioned.fill(
+                  child: FlutterMap(
+                    mapController: _mapController,
+                    options: const MapOptions(
+                      initialCenter: _cdoCenter,
+                      initialZoom: 14.5,
+                      minZoom: 10,
+                      maxZoom: 19,
                     ),
+                    children: [
+                      TileLayer(
+                        urlTemplate:
+                            'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                        userAgentPackageName: 'com.subay.app',
+                        maxZoom: 19,
+                      ),
+                      if (_roadSegments.isNotEmpty) ...[
+                        PolylineLayer(polylines: _buildSegmentOutlinePolylines()),
+                        PolylineLayer(polylines: _buildSegmentColorPolylines()),
+                      ],
+                      MarkerLayer(markers: _buildMarkers()),
+                    ],
                   ),
                 ),
-                // First-load affordance — makes the initial "no markers yet"
-                // moment read as loading rather than empty.
-                if (!_hasLoadedOnce)
-                  Container(
-                    margin: const EdgeInsets.only(top: 6),
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(AppRadius.lg),
-                      boxShadow: AppShadows.sm,
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const SizedBox(
-                          width: 14,
-                          height: 14,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: AppColors.primary,
-                          ),
+
+                // ── SEARCH BAR ──────────────────────────────────────────────
+                Positioned(
+                  top: 10,
+                  left: 12,
+                  right: 12,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        decoration: BoxDecoration(
+                          color: isDark ? AppColors.darkSurface : Colors.white,
+                          borderRadius: BorderRadius.circular(14),
+                          border: isDark
+                              ? Border.all(color: AppColors.darkBorder)
+                              : null,
+                          boxShadow: AppShadows.lg,
                         ),
-                        const SizedBox(width: 8),
-                        Text(
-                          'Loading flood data…',
+                        clipBehavior: Clip.antiAlias,
+                        child: TextField(
+                          controller: _searchController,
+                          focusNode: _searchFocus,
                           style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w500,
-                            color: AppColors.textMuted,
+                            fontSize: 14,
+                            color: isDark
+                                ? AppColors.darkTextPrimary
+                                : AppColors.textPrimary,
+                          ),
+                          onTap: () {
+                            if (_searchController.text.isNotEmpty) {
+                              setState(() => _showSuggestions = true);
+                            }
+                          },
+                          decoration: InputDecoration(
+                            hintText: 'Search a place in Cagayan de Oro...',
+                            hintStyle: TextStyle(
+                                color: isDark
+                                    ? AppColors.darkTextMuted
+                                    : AppColors.textMuted,
+                                fontSize: 13.5),
+                            prefixIcon: Icon(Icons.location_on_outlined,
+                                color: isDark
+                                    ? AppColors.darkAccent
+                                    : AppColors.primary,
+                                size: 21),
+                            suffixIcon: _isSearching
+                                ? Padding(
+                                    padding: const EdgeInsets.all(12),
+                                    child: SizedBox(
+                                      width: 18,
+                                      height: 18,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: isDark
+                                            ? AppColors.darkAccent
+                                            : AppColors.primary,
+                                      ),
+                                    ),
+                                  )
+                                : (_searchController.text.isNotEmpty
+                                    ? IconButton(
+                                        icon: Icon(Icons.close,
+                                            color: isDark
+                                                ? AppColors.darkTextMuted
+                                                : AppColors.textMuted,
+                                            size: 18),
+                                        onPressed: () {
+                                          _searchController.clear();
+                                          setState(() {
+                                            _searchedLocation = null;
+                                            _searchedName = null;
+                                            _showSuggestions = false;
+                                          });
+                                        },
+                                      )
+                                    : null),
+                            border: InputBorder.none,
+                            contentPadding:
+                                const EdgeInsets.symmetric(vertical: 14),
+                            fillColor:
+                                isDark ? AppColors.darkSurface : Colors.white,
+                            filled: true,
                           ),
                         ),
-                      ],
-                    ),
-                  ),
-                // Search suggestions dropdown
-                if (_showSuggestions && (_searchResults.isNotEmpty || _isSearching))
-                  Container(
-                    margin: const EdgeInsets.only(top: 4),
-                    constraints: const BoxConstraints(maxHeight: 250),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(AppRadius.lg),
-                      boxShadow: AppShadows.lg,
-                    ),
-                    child: _isSearching && _searchResults.isEmpty
-                        ? const Padding(
-                            padding: EdgeInsets.all(16),
-                            child: Center(
-                              child: SizedBox(
-                                width: 18,
-                                height: 18,
+                      ),
+                      // First-load affordance — makes the initial "no markers
+                      // yet" moment read as loading rather than empty.
+                      if (!_hasLoadedOnce)
+                        Container(
+                          margin: const EdgeInsets.only(top: 6),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: isDark
+                                ? AppColors.darkSurface
+                                : Colors.white,
+                            borderRadius: BorderRadius.circular(AppRadius.lg),
+                            border: isDark
+                                ? Border.all(color: AppColors.darkBorder)
+                                : null,
+                            boxShadow: AppShadows.sm,
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              SizedBox(
+                                width: 14,
+                                height: 14,
                                 child: CircularProgressIndicator(
                                   strokeWidth: 2,
-                                  color: AppColors.primary,
+                                  color: isDark
+                                      ? AppColors.darkAccent
+                                      : AppColors.primary,
                                 ),
                               ),
-                            ),
-                          )
-                        : ListView.separated(
-                            shrinkWrap: true,
-                            padding: EdgeInsets.zero,
-                            itemCount: _searchResults.length,
-                            separatorBuilder: (_, _) => const Divider(
-                              height: 1,
-                              color: AppColors.border,
-                              indent: 44,
-                            ),
-                            itemBuilder: (context, index) {
-                              final result = _searchResults[index];
-                              return InkWell(
-                                onTap: () => _selectSearchResult(result),
-                                borderRadius: BorderRadius.circular(10),
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 12,
-                                    vertical: 10,
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      const Icon(
-                                        Icons.location_on_outlined,
-                                        size: 18,
-                                        color: AppColors.textMuted,
+                              const SizedBox(width: 8),
+                              Text(
+                                'Loading flood data…',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w500,
+                                  color: isDark
+                                      ? AppColors.darkTextMuted
+                                      : AppColors.textMuted,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      // Search suggestions dropdown
+                      if (_showSuggestions &&
+                          (_searchResults.isNotEmpty || _isSearching))
+                        Container(
+                          margin: const EdgeInsets.only(top: 4),
+                          constraints: const BoxConstraints(maxHeight: 250),
+                          decoration: BoxDecoration(
+                            color: isDark
+                                ? AppColors.darkSurface
+                                : Colors.white,
+                            borderRadius: BorderRadius.circular(AppRadius.lg),
+                            border: isDark
+                                ? Border.all(color: AppColors.darkBorder)
+                                : null,
+                            boxShadow: AppShadows.lg,
+                          ),
+                          child: _isSearching && _searchResults.isEmpty
+                              ? Padding(
+                                  padding: const EdgeInsets.all(16),
+                                  child: Center(
+                                    child: SizedBox(
+                                      width: 18,
+                                      height: 18,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: isDark
+                                            ? AppColors.darkAccent
+                                            : AppColors.primary,
                                       ),
-                                      const SizedBox(width: 8),
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          mainAxisSize: MainAxisSize.min,
+                                    ),
+                                  ),
+                                )
+                              : ListView.separated(
+                                  shrinkWrap: true,
+                                  padding: EdgeInsets.zero,
+                                  itemCount: _searchResults.length,
+                                  separatorBuilder: (_, _) => Divider(
+                                    height: 1,
+                                    color: isDark
+                                        ? AppColors.darkBorder
+                                        : AppColors.border,
+                                    indent: 44,
+                                  ),
+                                  itemBuilder: (context, index) {
+                                    final result = _searchResults[index];
+                                    return InkWell(
+                                      onTap: () => _selectSearchResult(result),
+                                      borderRadius: BorderRadius.circular(10),
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 12,
+                                          vertical: 10,
+                                        ),
+                                        child: Row(
                                           children: [
-                                            Text(
-                                              result.shortName,
-                                              style: const TextStyle(
-                                                fontSize: 13,
-                                                fontWeight: FontWeight.w600,
-                                                color: AppColors.textPrimary,
-                                              ),
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
+                                            Icon(
+                                              Icons.location_on_outlined,
+                                              size: 18,
+                                              color: isDark
+                                                  ? AppColors.darkTextMuted
+                                                  : AppColors.textMuted,
                                             ),
-                                            if (result.displayName !=
-                                                result.shortName)
-                                              Padding(
-                                                padding:
-                                                    const EdgeInsets.only(top: 2),
-                                                child: Text(
-                                                  result.displayName,
-                                                  style: const TextStyle(
-                                                    fontSize: 11,
-                                                    color: AppColors.textMuted,
+                                            const SizedBox(width: 8),
+                                            Expanded(
+                                              child: Column(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.start,
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  Text(
+                                                    result.shortName,
+                                                    style: TextStyle(
+                                                      fontSize: 13,
+                                                      fontWeight:
+                                                          FontWeight.w600,
+                                                      color: isDark
+                                                          ? AppColors
+                                                              .darkTextPrimary
+                                                          : AppColors
+                                                              .textPrimary,
+                                                    ),
+                                                    maxLines: 1,
+                                                    overflow:
+                                                        TextOverflow.ellipsis,
                                                   ),
-                                                  maxLines: 1,
-                                                  overflow: TextOverflow.ellipsis,
-                                                ),
+                                                  if (result.displayName !=
+                                                      result.shortName)
+                                                    Padding(
+                                                      padding:
+                                                          const EdgeInsets.only(
+                                                              top: 2),
+                                                      child: Text(
+                                                        result.displayName,
+                                                        style: TextStyle(
+                                                          fontSize: 11,
+                                                          color: isDark
+                                                              ? AppColors
+                                                                  .darkTextMuted
+                                                              : AppColors
+                                                                  .textMuted,
+                                                        ),
+                                                        maxLines: 1,
+                                                        overflow: TextOverflow
+                                                            .ellipsis,
+                                                      ),
+                                                    ),
+                                                ],
                                               ),
+                                            ),
                                           ],
                                         ),
                                       ),
-                                    ],
-                                  ),
+                                    );
+                                  },
                                 ),
-                              );
-                            },
-                          ),
+                        ),
+                    ],
                   ),
+                ),
+
+                // ── LEGEND ─────────────────────────────────────────────────
+                Positioned(
+                  top: 68,
+                  right: 12,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 9),
+                    decoration: BoxDecoration(
+                      color: isDark
+                          ? AppColors.darkSurface.withValues(alpha: 0.97)
+                          : Colors.white.withValues(alpha: 0.97),
+                      borderRadius: BorderRadius.circular(12),
+                      border: isDark
+                          ? Border.all(color: AppColors.darkBorder)
+                          : null,
+                      boxShadow: AppShadows.lg,
+                    ),
+                    child: const Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _LegendItem(
+                            color: AppColors.danger,
+                            icon: Icons.priority_high_rounded,
+                            label: 'Danger'),
+                        SizedBox(height: 7),
+                        _LegendItem(
+                            color: AppColors.alert,
+                            icon: Icons.priority_high_rounded,
+                            label: 'Alert'),
+                        SizedBox(height: 7),
+                        _LegendItem(
+                            color: AppColors.normal,
+                            icon: Icons.check_rounded,
+                            label: 'Normal'),
+                      ],
+                    ),
+                  ),
+                ),
+
+                // ── MY LOCATION ────────────────────────────────────────────
+                Positioned(
+                  bottom: 86,
+                  right: 14,
+                  child: FloatingActionButton.small(
+                    heroTag: 'loc',
+                    onPressed: _goToCurrentLocation,
+                    backgroundColor:
+                        isDark ? AppColors.darkSurface : Colors.white,
+                    elevation: 3,
+                    child: _isLocating
+                        ? SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: isDark
+                                    ? AppColors.darkAccent
+                                    : AppColors.primary),
+                          )
+                        : Icon(Icons.my_location,
+                            color:
+                                isDark ? AppColors.darkAccent : AppColors.primary,
+                            size: 20),
+                  ),
+                ),
+
+                // ── FIND ROUTE ─────────────────────────────────────────────
+                Positioned(
+                  bottom: 18,
+                  right: 14,
+                  child: FloatingActionButton.extended(
+                    heroTag: 'route',
+                    onPressed: () =>
+                        widget.onGoToRouteWithDestination?.call(),
+                    backgroundColor: AppColors.primary,
+                    foregroundColor: Colors.white,
+                    elevation: 4,
+                    shape: const StadiumBorder(),
+                    icon: const Icon(Icons.navigation_rounded, size: 17),
+                    label: const Text(
+                      'Find Route',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
-
-          // ── LEGEND ───────────────────────────────────────────────────────
-          Positioned(
-            top: topPad + 64,
-            right: 12,
-            child: Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.95),
-                borderRadius: BorderRadius.circular(AppRadius.md),
-                boxShadow: AppShadows.sm,
-              ),
-              child: const Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _LegendItem(color: AppColors.danger, label: 'Danger'),
-                  SizedBox(height: 4),
-                  _LegendItem(color: AppColors.alert, label: 'Alert'),
-                  SizedBox(height: 4),
-                  _LegendItem(color: AppColors.normal, label: 'Normal'),
-                ],
-              ),
-            ),
-          ),
-
-          // ── MY LOCATION + ROUTE FABS ──────────────────────────────────────
-          Positioned(
-            bottom: 86,
-            right: 14,
-            child: FloatingActionButton.small(
-              heroTag: 'loc',
-              onPressed: _goToCurrentLocation,
-              backgroundColor: Colors.white,
-              elevation: 3,
-              child: _isLocating
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: AppColors.primary),
-                    )
-                  : const Icon(Icons.my_location,
-                      color: AppColors.primary, size: 20),
-            ),
-          ),
-          Positioned(
-            bottom: 20,
-            right: 14,
-            child: FloatingActionButton(
-              heroTag: 'route',
-              onPressed: () => widget.onGoToRouteWithDestination?.call(),
-              child: const Icon(Icons.route),
-            ),
-          ),
-
         ],
       ),
     );
   }
 } // ← closes _MapScreenState
+
+// ── App Header ────────────────────────────────────────────────────────────────
+
+class _MapHeader extends StatelessWidget {
+  final double topPad;
+  final VoidCallback onSearchTap;
+
+  const _MapHeader({required this.topPad, required this.onSearchTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: AppColors.primary,
+      padding: EdgeInsets.only(
+        top: topPad + 10,
+        left: 16,
+        right: 8,
+        bottom: 12,
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'FLOODSIGHT',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 22,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.6,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Safer Roads, Stronger Communities',
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.9),
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w500,
+                    letterSpacing: 0.2,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            onPressed: onSearchTap,
+            tooltip: 'Search',
+            icon: const Icon(Icons.search_rounded,
+                color: Colors.white, size: 26),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 // ── CCTV Pin ──────────────────────────────────────────────────────────────────
 
@@ -1013,23 +1181,47 @@ class _TrianglePainter extends CustomPainter {
 
 class _LegendItem extends StatelessWidget {
   final Color color;
+  final IconData icon;
   final String label;
-  const _LegendItem({required this.color, required this.label});
+  const _LegendItem({
+    required this.color,
+    required this.icon,
+    required this.label,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         Container(
-          width: 8,
-          height: 8,
-          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+          width: 18,
+          height: 18,
+          decoration: BoxDecoration(
+            color: color,
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: color.withValues(alpha: 0.35),
+                blurRadius: 4,
+                offset: const Offset(0, 1),
+              ),
+            ],
+          ),
+          child: Icon(icon, color: Colors.white, size: 12),
         ),
-        const SizedBox(width: 5),
-        Text(label,
-            style: const TextStyle(
-                fontSize: 10, color: AppColors.textSecondary)),
+        const SizedBox(width: 7),
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 11.5,
+            fontWeight: FontWeight.w600,
+            color: isDark
+                ? AppColors.darkTextSecondary
+                : AppColors.textSecondary,
+          ),
+        ),
       ],
     );
   }
@@ -1048,9 +1240,10 @@ class _CctvBottomSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Container(
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: isDark ? AppColors.darkSurface : Colors.white,
         borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xxl)),
       ),
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 28),
@@ -1064,7 +1257,7 @@ class _CctvBottomSheet extends StatelessWidget {
             child: Container(
               width: 32, height: 3,
               decoration: BoxDecoration(
-                color: const Color(0xFFDDDDDD),
+                color: isDark ? AppColors.darkBorder : const Color(0xFFDDDDDD),
                 borderRadius: BorderRadius.circular(2),
               ),
             ),
@@ -1090,22 +1283,30 @@ class _CctvBottomSheet extends StatelessWidget {
                       const SizedBox(width: 7),
                       Flexible(
                         child: Text(location.name,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 15,
                             fontWeight: FontWeight.w700,
-                            color: AppColors.textPrimary,
+                            color: isDark
+                                ? AppColors.darkTextPrimary
+                                : AppColors.textPrimary,
                           )),
                       ),
                     ]),
                     const SizedBox(height: 4),
                     Row(children: [
-                      const Icon(Icons.location_on_outlined,
-                          size: 12, color: AppColors.textMuted),
+                      Icon(Icons.location_on_outlined,
+                          size: 12,
+                          color: isDark
+                              ? AppColors.darkTextMuted
+                              : AppColors.textMuted),
                       const SizedBox(width: 3),
                       Flexible(
                         child: Text(location.address,
-                          style: const TextStyle(
-                              fontSize: 11, color: AppColors.textMuted)),
+                          style: TextStyle(
+                              fontSize: 11,
+                              color: isDark
+                                  ? AppColors.darkTextMuted
+                                  : AppColors.textMuted)),
                       ),
                     ]),
                   ],
@@ -1121,26 +1322,31 @@ class _CctvBottomSheet extends StatelessWidget {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             decoration: BoxDecoration(
-              color: AppColors.infoLight,
+              color: isDark ? AppColors.darkSurfaceMuted : AppColors.infoLight,
               borderRadius: BorderRadius.circular(AppRadius.lg),
             ),
             child: Row(
               children: [
-                const Icon(Icons.water_drop_outlined,
-                    color: AppColors.infoText, size: 18),
+                Icon(Icons.water_drop_outlined,
+                    color: isDark ? AppColors.darkAccent : AppColors.infoText,
+                    size: 18),
                 const SizedBox(width: 8),
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('Current Water Level',
+                    Text('Current Water Level',
                       style: TextStyle(
-                          fontSize: 10, color: AppColors.textMuted)),
+                          fontSize: 10,
+                          color: isDark
+                              ? AppColors.darkTextMuted
+                              : AppColors.textMuted)),
                     Text(
                       '${location.floodHeight.toStringAsFixed(2)} m',
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.w700,
-                        color: AppColors.infoText,
+                        color:
+                            isDark ? AppColors.darkAccent : AppColors.infoText,
                       ),
                     ),
                   ],
@@ -1148,8 +1354,11 @@ class _CctvBottomSheet extends StatelessWidget {
                 const Spacer(),
                 Text(
                   'Updated ${location.lastUpdated}',
-                  style: const TextStyle(
-                      fontSize: 10, color: AppColors.textMuted),
+                  style: TextStyle(
+                      fontSize: 10,
+                      color: isDark
+                          ? AppColors.darkTextMuted
+                          : AppColors.textMuted),
                 ),
               ],
             ),
@@ -1157,15 +1366,16 @@ class _CctvBottomSheet extends StatelessWidget {
           const SizedBox(height: 12),
 
           // ── Vehicle passability list ──────────────────────────────────────
-          const Text(
+          Text(
             'Vehicle Passability',
             style: TextStyle(
               fontSize: 12,
               fontWeight: FontWeight.w600,
-              color: AppColors.textSecondary,
+              color: isDark
+                  ? AppColors.darkTextSecondary
+                  : AppColors.textSecondary,
             ),
-          ),
-          const SizedBox(height: 6),
+          ),          const SizedBox(height: 6),
 
           // Grid of vehicle rows
           ..._vehicleTypes.map((v) =>
@@ -1201,10 +1411,19 @@ class _VehicleRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     final passable = vehicle.canPass(waterLevel);
-    final Color bgColor   = passable ? AppColors.normalLight  : AppColors.dangerLight;
-    final Color iconColor = passable ? AppColors.normalText   : AppColors.dangerText;
-    final Color textColor = passable ? AppColors.normalText   : AppColors.dangerText;
+    final Color bgColor = isDark
+        ? (passable
+            ? AppColors.normal.withValues(alpha: 0.16)
+            : AppColors.danger.withValues(alpha: 0.16))
+        : (passable ? AppColors.normalLight : AppColors.dangerLight);
+    final Color iconColor = isDark
+        ? (passable ? AppColors.normal : AppColors.danger)
+        : (passable ? AppColors.normalText : AppColors.dangerText);
+    final Color textColor = iconColor;
+    final Color nameColor = isDark ? AppColors.darkTextPrimary : AppColors.textPrimary;
+    final Color hintColor = isDark ? AppColors.darkTextMuted : AppColors.textMuted;
     final String statusLabel = passable ? 'Passable'   : 'Unpassable';
     final IconData statusIcon = passable ? Icons.check_circle_outline
                                          : Icons.cancel_outlined;
@@ -1223,18 +1442,18 @@ class _VehicleRow extends StatelessWidget {
           Expanded(
             child: Text(
               vehicle.name,
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 12,
                 fontWeight: FontWeight.w500,
-                color: AppColors.textPrimary,
+                color: nameColor,
               ),
             ),
           ),
           // Threshold hint
           Text(
             '≤ ${vehicle.maxPassableHeight.toStringAsFixed(2)} m',
-            style: const TextStyle(
-                fontSize: 10, color: AppColors.textMuted),
+            style: TextStyle(
+                fontSize: 10, color: hintColor),
           ),
           const SizedBox(width: 8),
           Row(
