@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: floodsight-api
+    runtime: node
+    plan: free
+    region: singapore
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB
+        value: CCTVs
+      - key: MONGODB_COLLECTION
+        value: cctv data
+      - key: MONGODB_METRICS_COLLECTION
+        value: routing metrics
