@@ -97,6 +97,21 @@ function sanitizeDocs(docs) {
 
 // ── Routes ─────────────────────────────────────────────────────────────────
 
+// Friendly root page (the API itself lives under /api).
+app.get('/', (req, res) => {
+  res.json({
+    service: 'FloodSight backend',
+    status: 'ok',
+    dbConnected: dbCollection !== null,
+    endpoints: [
+      '/api/health',
+      '/api/cctv',
+      '/api/alerts',
+      '/api/routing-metrics',
+    ],
+  });
+});
+
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', dbConnected: dbCollection !== null });
@@ -242,3 +257,16 @@ app.listen(PORT, () => {
 
 connectDB();
 scheduleReconnect();
+
+// ── Free-tier keep-alive ─────────────────────────────────────────────────────
+// Render's free instances sleep after ~15 minutes without inbound traffic.
+// Pinging our own public URL counts as inbound traffic and keeps the service
+// warm, so phone users do not hit a 30-60s cold start on first request.
+const SELF_URL = process.env.RENDER_EXTERNAL_URL;
+if (SELF_URL) {
+  const ping = () => {
+    fetch(`${SELF_URL}/api/health`).catch(() => {});
+  };
+  setInterval(ping, 10 * 60 * 1000);
+  console.log(`   Keep-alive enabled for ${SELF_URL}`);
+}
