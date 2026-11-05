@@ -25,6 +25,8 @@ const client = new MongoClient(uri, {
 // Explicitly target your database and collection names
 const DB_NAME = process.env.MONGODB_DB || 'CCTVs';
 const COLLECTION_NAME = process.env.MONGODB_COLLECTION || 'cctv data';
+const METRICS_COLLECTION_NAME =
+  process.env.MONGODB_METRICS_COLLECTION || 'routing metrics';
 const MOBILE_CCTV_PROJECTION = {
   _id: 1,
   status: 1,
@@ -36,6 +38,7 @@ const MOBILE_CCTV_PROJECTION = {
 };
 
 let dbCollection = null;
+let metricsCollection = null;
 let isConnecting = false;
 
 // This backend is fully database-driven. When MongoDB is unavailable or has no
@@ -50,14 +53,17 @@ async function connectDB() {
     await client.connect();
     const database = client.db(DB_NAME);
     dbCollection = database.collection(COLLECTION_NAME);
+    metricsCollection = database.collection(METRICS_COLLECTION_NAME);
     console.log('✅ Connected to MongoDB Atlas');
     console.log(`   Database: ${DB_NAME} | Collection: ${COLLECTION_NAME}`);
+    console.log(`   Metrics collection: ${METRICS_COLLECTION_NAME}`);
   } catch (err) {
     console.error('❌ MongoDB connection error:', err.message);
     console.error('   The server will start and return empty data until connected.');
     console.error('   Make sure your IP is whitelisted in MongoDB Atlas:');
     console.error('   Atlas → Network Access → Add IP → 0.0.0.0/0 (for testing)');
     dbCollection = null;
+    metricsCollection = null;
   } finally {
     isConnecting = false;
   }
@@ -166,12 +172,72 @@ app.get('/api/alerts', async (req, res) => {
   }
 });
 
+// POST routing performance metrics from the Flutter app.
+// Stored in the `routing metrics` collection (configurable via
+// MONGODB_METRICS_COLLECTION) so mobile runs can be inspected in MongoDB
+// without needing a browser DevTools console.
+app.post('/api/routing-metrics', async (req, res) => {
+  try {
+    if (!metricsCollection) {
+      return res.status(503).json({
+        error: 'Metrics storage unavailable: MongoDB is not connected.',
+      });
+    }
+
+    const payload = req.body;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return res.status(400).json({ error: 'Invalid metrics payload.' });
+    }
+
+    const document = {
+      ...payload,
+      receivedAt: new Date(),
+      receivedBy: 'floodsight-backend',
+    };
+
+    const result = await metricsCollection.insertOne(document);
+    return res.status(201).json({
+      ok: true,
+      id: result.insertedId.toString(),
+    });
+  } catch (err) {
+    console.error('Error storing routing metrics:', err.message);
+    return res.status(500).json({ error: 'Failed to store routing metrics.' });
+  }
+});
+
+// GET recent routing metrics (newest first) for inspection/export.
+app.get('/api/routing-metrics', async (req, res) => {
+  try {
+    if (!metricsCollection) {
+      return res.json([]);
+    }
+
+    const requested = Number.parseInt(req.query.limit, 10);
+    const limit = Number.isFinite(requested)
+      ? Math.min(Math.max(requested, 1), 500)
+      : 100;
+
+    const documents = await metricsCollection
+      .find({})
+      .sort({ receivedAt: -1 })
+      .limit(limit)
+      .toArray();
+
+    res.json(sanitizeDocs(documents));
+  } catch (err) {
+    console.error('Error fetching routing metrics:', err.message);
+    res.json([]);
+  }
+});
+
 // ── Start server ─────────────────────────────────────────────────────────────
 // Start the server immediately, attempt DB connection in the background
 app.listen(PORT, () => {
   console.log(`🚀 SUBAY backend running on http://localhost:${PORT}`);
   console.log(`   CCTV endpoint:  http://localhost:${PORT}/api/cctv`);
   console.log(`   Alerts endpoint: http://localhost:${PORT}/api/alerts`);
+  console.log(`   Metrics endpoint: http://localhost:${PORT}/api/routing-metrics`);
 });
 
 connectDB();

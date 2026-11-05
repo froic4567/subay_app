@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:latlong2/latlong.dart';
 
 import '../config/app_config.dart';
+import 'routing_metrics_service.dart';
 
 /// Raw measurements collected around a single routing computation.
 class RoutingTestSnapshot {
@@ -84,10 +87,10 @@ class RoutingTestLogger {
 
   static final _RoutingTestSession _session = _RoutingTestSession();
 
-  /// Prints the full routing test log when [AppConfig.debugRoutingLog] is true.
+  /// Records the full routing test metrics. Each snapshot is uploaded to the
+  /// backend (MongoDB) so it can be inspected on mobile, and optionally also
+  /// printed to the console when [AppConfig.debugRoutingLog] is true.
   static void logRoutingTest(RoutingTestSnapshot snapshot) {
-    if (!AppConfig.debugRoutingLog) return;
-
     _updateSessionCounters(snapshot);
 
     final ts = DateTime.now().toUtc().toIso8601String();
@@ -138,6 +141,95 @@ class RoutingTestLogger {
     final nodeSeq = snapshot.nodeSequence.isEmpty
         ? '[no path]'
         : '[${snapshot.nodeSequence.join(', ')}]';
+
+    // Upload one document per route calculation to MongoDB. Unlike the console
+    // log, this works on mobile devices too.
+    if (AppConfig.collectRoutingMetrics) {
+      unawaited(
+        RoutingMetricsService.send(
+          <String, dynamic>{
+            'timestamp': ts,
+            'platform': RoutingMetricsService.platformName,
+            'origin': {
+              'lat': snapshot.origin.latitude,
+              'lng': snapshot.origin.longitude,
+            },
+            'destination': {
+              'lat': snapshot.destination.latitude,
+              'lng': snapshot.destination.longitude,
+            },
+            'routeFound': snapshot.routeFound,
+            'isReroute': snapshot.isReroute,
+            'timingsMs': {
+              'dbFetch': snapshot.dbFetchTime.inMicroseconds / 1000.0,
+              'overpassFetch':
+                  snapshot.overpassFetchTime.inMicroseconds / 1000.0,
+              'osrmFetch': snapshot.osrmFetchTime.inMicroseconds / 1000.0,
+              'detourSearch':
+                  snapshot.detourSearchTime.inMicroseconds / 1000.0,
+              'valhallaFetch':
+                  snapshot.valhallaFetchTime.inMicroseconds / 1000.0,
+              'graphConstruction': graphMs,
+              'dijkstra': snapshot.dijkstraTime.inMicroseconds / 1000.0,
+              'pathGeneration': pathMs,
+              'unaccounted': unaccountedMs,
+            },
+            'metrics': {
+              'dangerZoneAvoidanceRate': dangerRate,
+              'alertZonePreferenceScore': alertScore,
+              'legalRouteComplianceRate': legalRate,
+              'rerouteAccuracy': rerouteAccuracy,
+              'rerouteTriggerLatencyMs':
+                  snapshot.rerouteTriggerLatency?.inMilliseconds,
+              'multiFeedOverheadMsPerFeed':
+                  snapshot.multiFeedOverheadMsPerFeed,
+              'activeFeedCount': snapshot.activeFeedCount,
+            },
+            'checks': {
+              'graphConstructionPass': graphPass,
+              'pathGenerationPass': pathPass,
+              'dangerAvoidancePass': dangerPass,
+              'alertPreferencePass': alertPass,
+              'legalCompliancePass': legalPass,
+              'illegalDetourPass': detourPass,
+              'rerouteLatencyPass': rerouteLatencyPass,
+              'rerouteAccuracyPass': rerouteAccuracyPass,
+              'multiFeedOverheadPass': overheadPass,
+            },
+            'route': {
+              'distanceKm': snapshot.distanceKm,
+              'etaText': snapshot.etaText,
+              'nodeSequence': snapshot.nodeSequence,
+              'illegalDetours': snapshot.illegalDetours,
+            },
+            'session': {
+              'totalRouteRequests': _session.totalRouteRequests,
+              'dangerFreeCount': _session.dangerFreeCount,
+              'alertPreferenceCases': _session.alertPreferenceCases,
+              'alertPreferenceSuccesses':
+                  _session.alertPreferenceSuccesses,
+              'legalComplianceChecks': _session.legalComplianceChecks,
+              'legalComplianceSuccesses':
+                  _session.legalComplianceSuccesses,
+              'rerouteEvents': _session.rerouteEvents,
+              'rerouteAccurateCount': _session.rerouteAccurateCount,
+            },
+            'flags': {
+              'dangerFreeRoute': snapshot.dangerFreeRoute,
+              'alertPreferenceApplicable':
+                  snapshot.alertPreferenceApplicable,
+              'normalChosenWhenBothExist':
+                  snapshot.normalChosenWhenBothExist,
+              'allSegmentsLegal': snapshot.allSegmentsLegal,
+            },
+          },
+        ),
+      );
+    }
+
+    // Printing is optional; the MongoDB upload above always happens when
+    // collection is enabled.
+    if (!AppConfig.debugRoutingLog) return;
 
     final buffer = StringBuffer()
       ..writeln('=== ROUTING ADVISORY TEST LOG ===')
