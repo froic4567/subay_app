@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import '../app_version.dart';
 import '../services/auth_service.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_radius.dart';
@@ -26,12 +27,15 @@ class _LoginScreenState extends State<LoginScreen> {
     if (user != null) {
       Navigator.pushReplacementNamed(context, '/home');
     } else {
+      final detail = AuthService.instance.lastError;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
+        SnackBar(
           content: Text(
-            'Google Sign-In failed or was cancelled. Please try again.',
+            detail == null
+                ? 'Google Sign-In failed. Please try again.'
+                : 'Google Sign-In failed.\n$detail',
           ),
-          duration: Duration(seconds: 3),
+          duration: const Duration(seconds: 8),
         ),
       );
     }
@@ -143,6 +147,18 @@ class _LoginScreenState extends State<LoginScreen> {
                 'By continuing, you agree to SUBAY\'s\nPrivacy Policy and Terms of Service.',
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 11, color: AppColors.textMuted, height: 1.5),
+              ),
+
+              const SizedBox(height: 10),
+
+              const Text(
+                AppVersion.label,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 10,
+                  color: AppColors.textMuted,
+                  letterSpacing: 0.3,
+                ),
               ),
 
               const Spacer(flex: 1),

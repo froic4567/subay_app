@@ -43,7 +43,7 @@ class CctvService {
       final response = await http.get(
         Uri.parse(url),
         headers: {'Accept': 'application/json'},
-      ).timeout(const Duration(seconds: 8));
+      ).timeout(const Duration(seconds: 30));
 
       print('📡 [CCTV] Response status: ${response.statusCode}');
 
@@ -80,7 +80,7 @@ class CctvService {
       final response = await http.get(
         Uri.parse(url),
         headers: {'Accept': 'application/json'},
-      ).timeout(const Duration(seconds: 8));
+      ).timeout(const Duration(seconds: 30));
 
       print('📡 [Alerts] Response status: ${response.statusCode}');
 
@@ -112,7 +112,7 @@ class CctvService {
       final response = await http.get(
         Uri.parse(url),
         headers: {'Accept': 'application/json'},
-      ).timeout(const Duration(seconds: 8));
+      ).timeout(const Duration(seconds: 30));
 
       print('📡 [Notifications] Response status: ${response.statusCode}');
 

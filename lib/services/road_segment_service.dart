@@ -87,6 +87,11 @@ class RoadSegmentService {
   static final Map<String, RoadSegmentResult?> _cache = {};
   static bool _persistenceLoaded = false;
 
+  /// After a full batch failure, don't hammer Overpass again for a short
+  /// while. Routing keeps working from the camera-coordinate fallback in the
+  /// meantime, and this prevents every reroute from stalling on timeouts.
+  static DateTime? _batchRetryNotBefore;
+
   /// Returns the road segment covering [coordinate], or `null` if no
   /// vehicle-usable road was found nearby (graceful degradation — callers
   /// should simply skip drawing a segment, not fabricate one).
@@ -314,17 +319,28 @@ class RoadSegmentService {
 
     print('ℹ️ [RoadSegmentCache] Fetching ${missing.length} missing coordinates in ONE Overpass request: $minLat,$minLon -> $maxLat,$maxLon');
 
+    // Respect the short cooldown set after a previous complete failure.
+    final retryNotBefore = _batchRetryNotBefore;
+    if (retryNotBefore != null && DateTime.now().isBefore(retryNotBefore)) {
+      print('⚠️ [RoadSegment] Batch Overpass cooling down; using cached/null geometry');
+      if (out.isNotEmpty) return out;
+      throw Exception('Overpass batch fetch cooling down after a recent failure');
+    }
+
     // Single bbox Overpass query
     List<_OverpassWay> ways;
     try {
       ways = await _performLimitedQueryBox(minLat, minLon, maxLat, maxLon);
+      _batchRetryNotBefore = null;
       print('✅ [RoadSegment] Batch OSM query completed: ${ways.length} ways');
     } catch (e) {
       print('❌ [RoadSegment] Batch Overpass failed: $e');
-      // Propagate the failure so callers (routing) can conservatively
-      // abort rather than assuming no hazard when geometry couldn't be
-      // fetched. Do not silently return nulls for missing cache in this
-      // failure mode.
+      _batchRetryNotBefore = DateTime.now().add(const Duration(seconds: 45));
+      // If some cameras were already resolved from cache, return that partial
+      // map so routing can proceed; only rethrow when there is nothing usable.
+      if (out.isNotEmpty) return out;
+      // Propagate the failure so callers (routing) can fall back to the
+      // camera-coordinate checks instead of silently assuming "no hazard".
       rethrow;
     }
 
@@ -504,11 +520,11 @@ class RoadSegmentService {
           '(._;>;);'
           'out geom;';
 
-      const int maxAttempts = 2;
+      const int maxAttempts = 1;
       for (final endpoint in _overpassUrls) {
         for (var attempt = 1; attempt <= maxAttempts; attempt++) {
           try {
-            final response = await http.post(Uri.parse(endpoint), body: {'data': query}).timeout(_timeout * 2);
+            final response = await http.post(Uri.parse(endpoint), body: {'data': query}).timeout(_timeout);
             if (response.statusCode != 200) throw Exception('Overpass ${endpoint} returned ${response.statusCode}');
             final body = jsonDecode(response.body) as Map<String, dynamic>;
             final elements = body['elements'] as List<dynamic>? ?? [];

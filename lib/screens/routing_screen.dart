@@ -32,7 +32,8 @@ class RoutingScreen extends StatefulWidget {
   State<RoutingScreen> createState() => _RoutingScreenState();
 }
 
-class _RoutingScreenState extends State<RoutingScreen> {
+class _RoutingScreenState extends State<RoutingScreen>
+    with SingleTickerProviderStateMixin {
   final _destController = TextEditingController();
   final _originController = TextEditingController();
   final _mapController = MapController();
@@ -65,6 +66,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
   Timer? _destDebounce;
   // Periodically re-checks flood conditions and reroutes if they change.
   Timer? _rerouteTimer;
+  bool _rerouteInFlight = false;
   List<GeoSearchResult> _originResults = [];
   List<GeoSearchResult> _destResults = [];
   bool _originSearching = false;
@@ -79,6 +81,15 @@ class _RoutingScreenState extends State<RoutingScreen> {
   // GPS tracking for navigation and the always-visible location marker
   StreamSubscription<Position>? _positionSub;
   LatLng? _currentPosition;
+
+  // Smoothly interpolates the camera between 1 Hz GPS fixes instead of
+  // jumping the map once per second.
+  AnimationController? _cameraAnimation;
+
+  /// True while the camera should follow the live position during navigation.
+  /// Any manual pan/zoom turns this off so the user can freely inspect the
+  /// map; the re-center button turns it back on.
+  bool _mapFollowsUser = true;
 
   // Google-Maps-style progress: while navigating, only the road still ahead
   // of the user is drawn. `_routeProgressSegment` is the last matched segment
@@ -96,13 +107,25 @@ class _RoutingScreenState extends State<RoutingScreen> {
     return meters / 1000.0;
   }
 
-  /// Distance shown in the navigation bar: the part still ahead once
-  /// navigation has started, otherwise the full planned route.
+  /// True whenever the drawn route should shrink as the device moves: during
+  /// navigation, or while previewing a route that starts at "Current location".
+  bool get _shouldTrackProgress =>
+      _routePlanResult != null &&
+      (_navigationStarted || _originIsCurrentLocation);
+
+  /// Distance shown in the navigation bar: the part still ahead, otherwise the
+  /// full planned route.
   double get _displayDistanceKm {
     final result = _routePlanResult;
     if (result == null) return 0;
-    if (_navigationStarted && _remainingRoute != null) {
+    if (_shouldTrackProgress && _remainingRoute != null) {
       return _lineLengthKm(_remainingRoute!);
+    }
+    // Some very short/edge-case OSRM responses report 0 distance even though
+    // a polyline was returned; fall back to the geometry length so the UI
+    // never shows a misleading 0.0 km for a real drawn route.
+    if (result.distanceKm <= 0 && result.polyline.length >= 2) {
+      return _lineLengthKm(result.polyline);
     }
     return result.distanceKm;
   }
@@ -112,7 +135,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
   double get _displayDurationMinutes {
     final result = _routePlanResult;
     if (result == null) return 0;
-    if (_navigationStarted &&
+    if (_shouldTrackProgress &&
         _remainingRoute != null &&
         result.distanceKm > 0 &&
         result.durationMinutes > 0) {
@@ -168,6 +191,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
     _destDebounce?.cancel();
     _rerouteTimer?.cancel();
     _positionSub?.cancel();
+    _cameraAnimation?.dispose();
     _destController.dispose();
     _originController.dispose();
     _mapController.dispose();
@@ -319,12 +343,8 @@ class _RoutingScreenState extends State<RoutingScreen> {
       }
 
       final status = await LocationService.ensureAccess();
-      if (status == LocationAccessStatus.serviceDisabled) {
-        _showLocationMessage('Please enable location services to use your current location.');
-        return;
-      }
       if (status != LocationAccessStatus.granted) {
-        _showLocationMessage('Location permission is required to use your current location.');
+        await _handleLocationAccessFailure(status);
         return;
       }
 
@@ -342,6 +362,10 @@ class _RoutingScreenState extends State<RoutingScreen> {
       _suppressOriginSearch = true;
       setState(() {
         _originLatLng = point;
+        // Keep the latched fix in sync. Without this, route building bails out
+        // with "Waiting for your current location" when the one-shot fix was
+        // used because the continuous stream had not emitted yet.
+        _currentPosition ??= point;
         _originIsCurrentLocation = true;
         _originController.text = 'Current location';
         _selectingOrigin = false;
@@ -350,6 +374,9 @@ class _RoutingScreenState extends State<RoutingScreen> {
         _showOriginSuggestions = false;
       });
       _suppressOriginSearch = false;
+
+      // Make sure the live stream is running for future updates.
+      _startLocationTracking();
 
       _safeMapMove(point, 16);
 
@@ -514,12 +541,88 @@ class _RoutingScreenState extends State<RoutingScreen> {
     );
   }
 
-  Future<void> _buildRoute() async {
-    if (_originIsCurrentLocation && _currentPosition == null) {
-      _showLocationMessage(
-        'Waiting for your current location before building the route.',
+  /// Explains why location access failed and offers the right system shortcut:
+  /// turn on device location, or open the app's permission settings.
+  Future<void> _handleLocationAccessFailure(
+    LocationAccessStatus status,
+  ) async {
+    if (!mounted) return;
+
+    if (status == LocationAccessStatus.serviceDisabled) {
+      final open = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Turn on location'),
+          content: const Text(
+            'Device location (GPS) is turned off. Turn it on to use your '
+            'current location and get live navigation updates.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Not now'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Open settings'),
+            ),
+          ],
+        ),
       );
+      if (open == true) {
+        await Geolocator.openLocationSettings();
+      }
       return;
+    }
+
+    if (status == LocationAccessStatus.permissionDeniedForever) {
+      final open = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Location permission needed'),
+          content: const Text(
+            'Location permission is blocked. Open app settings and allow '
+            'location access for FloodSight.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Open app settings'),
+            ),
+          ],
+        ),
+      );
+      if (open == true) {
+        await Geolocator.openAppSettings();
+      }
+      return;
+    }
+
+    _showLocationMessage(
+      'Location permission is required to use your current location.',
+    );
+  }
+
+  Future<void> _buildRoute() async {
+    if (_originIsCurrentLocation &&
+        _currentPosition == null &&
+        _originLatLng == null) {
+      // Try once to hydrate the fix before giving up, instead of leaving the
+      // user stuck on a message.
+      final point = await _fetchOneShotPosition();
+      if (!mounted) return;
+      if (point == null) {
+        _showLocationMessage(
+          'Waiting for your current location before building the route.',
+        );
+        return;
+      }
+      _currentPosition = point;
+      _originLatLng = point;
     }
     final origin = _effectiveOrigin;
     final destination = _destLatLng ?? _defaultLocation;
@@ -557,6 +660,20 @@ class _RoutingScreenState extends State<RoutingScreen> {
       // New geometry — restart progress tracking from its beginning.
       _routeProgressSegment = 0;
       _remainingRoute = null;
+
+      // The route was requested from the position the user had when they
+      // tapped "route". If they kept moving while the request was in flight
+      // (Overpass/OSRM can take a few seconds), snap the visible start to the
+      // live position so the line doesn't begin behind them (and never shows
+      // a "passed" chunk as if it were still ahead).
+      if (result != null &&
+          _originIsCurrentLocation &&
+          _currentPosition != null) {
+        _remainingRoute = _initialRemainder(
+          result.polyline,
+          _currentPosition!,
+        );
+      }
     });
 
     if (result != null) {
@@ -594,12 +711,20 @@ class _RoutingScreenState extends State<RoutingScreen> {
     if (_positionSub != null) return;
     try {
       final stream = await LocationService.watchPosition(
-        accuracy: LocationAccuracy.high,
-        distanceFilter: 5, // Update every 5 meters
+        accuracy: LocationAccuracy.bestForNavigation,
+        distanceFilter: 0, // every fix — roughly once per second
+        intervalDuration: const Duration(seconds: 1),
       );
       if (stream == null || !mounted) return;
 
-      _positionSub = stream.listen(_onPositionUpdate);
+      _positionSub = stream.listen(
+        _onPositionUpdate,
+        onError: (_) {
+          _positionSub?.cancel();
+          _positionSub = null;
+        },
+        cancelOnError: true,
+      );
     } catch (_) {
       // GPS tracking failed silently
     }
@@ -637,6 +762,50 @@ class _RoutingScreenState extends State<RoutingScreen> {
     return live;
   }
 
+  /// Eases the camera from its current center to [target] over ~0.85s. Called
+  /// once per GPS fix so movement looks continuous instead of jumping a whole
+  /// block at a time.
+  void _animateCameraTo(LatLng target) {
+    if (!mounted || !_mapHasLayout()) {
+      _safeMapMove(target, _mapController.camera.zoom);
+      return;
+    }
+
+    final LatLng start;
+    final double zoom;
+    try {
+      start = _mapController.camera.center;
+      zoom = _mapController.camera.zoom;
+    } catch (_) {
+      _safeMapMove(target, 16);
+      return;
+    }
+
+    if (start.latitude == target.latitude &&
+        start.longitude == target.longitude) {
+      return;
+    }
+
+    _cameraAnimation?.dispose();
+    final controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 850),
+    );
+    _cameraAnimation = controller;
+    controller.addListener(() {
+      if (!mounted) return;
+      final t = controller.value;
+      _mapController.move(
+        LatLng(
+          start.latitude + (target.latitude - start.latitude) * t,
+          start.longitude + (target.longitude - start.longitude) * t,
+        ),
+        zoom,
+      );
+    });
+    controller.forward();
+  }
+
   void _onPositionUpdate(Position position) {
     if (!mounted) return;
     final newLatLng = LatLng(position.latitude, position.longitude);
@@ -649,8 +818,9 @@ class _RoutingScreenState extends State<RoutingScreen> {
       if (_originIsCurrentLocation && !_navigationStarted && _routePlanResult == null) {
         _originLatLng = newLatLng;
       }
-      // Chop the passed part of the route away as the user moves.
-      if (_navigationStarted && _routePlanResult != null) {
+      // Chop the passed part of the route away as the user moves, both in
+      // navigation and in a current-location preview.
+      if (_shouldTrackProgress) {
         _remainingRoute = _trimRoute(_routePlanResult!.polyline, newLatLng);
       }
     });
@@ -658,15 +828,57 @@ class _RoutingScreenState extends State<RoutingScreen> {
     if (_navigationStarted) {
       // Keep the marker on screen only when it represents the live position;
       // when it falls back to a pinned start (GPS far off-route) the camera
-      // must stay on the route instead of chasing the device.
-      if (_navigationUserPoint == newLatLng) {
-        _safeMapMove(newLatLng, _mapController.camera.zoom);
+      // must stay on the route instead of chasing the device. If the user has
+      // manually panned/zoomed, leave the camera alone until re-center is
+      // tapped.
+      if (_mapFollowsUser && _navigationUserPoint == newLatLng) {
+        _animateCameraTo(newLatLng);
       }
     } else if (isFirstFix && _originLatLng == null && _destLatLng == null) {
       // First fix on an untouched routing map: center on the user so the
       // marker is actually on screen instead of the hard-coded default.
       _safeMapMove(newLatLng, 15);
     }
+  }
+
+  /// Projects [position] onto a freshly-built [route] and returns the portion
+  /// still ahead of the user.
+  ///
+  /// Used once right after a route is built from "Current location": planning
+  /// can take several seconds, so by the time it returns the stored origin may
+  /// already be behind the moving user. Snapping the visible start to the
+  /// nearest point on the line keeps the drawn route clear and ahead-only.
+  /// Returns null when the user is too far from the line to trust the
+  /// projection (then the full route is kept).
+  List<LatLng>? _initialRemainder(List<LatLng> route, LatLng position) {
+    if (route.length < 2) return null;
+
+    var bestDistance = double.infinity;
+    var bestPoint = route.first;
+    var bestSegment = 0;
+
+    for (var i = 0; i < route.length - 1; i++) {
+      final nearest =
+          GeoUtils.nearestPointOnSegment(position, route[i], route[i + 1]);
+      if (nearest.distanceM < bestDistance) {
+        bestDistance = nearest.distanceM;
+        bestPoint = nearest.point;
+        bestSegment = i;
+      }
+    }
+
+    // Generous initial tolerance: the planner's origin may be a little
+    // off-road, but don't snap to a route that is on the other side of town.
+    if (bestDistance > _offRouteThresholdM * 3) return null;
+
+    // Already at the very start — nothing to trim.
+    if (bestSegment == 0 &&
+        GeoUtils.haversineM(bestPoint, route.first) < 5) {
+      return null;
+    }
+
+    _routeProgressSegment = bestSegment;
+    return <LatLng>[bestPoint, ...route.skip(bestSegment + 1)];
   }
 
   /// Trims [route] to the portion the user has not driven yet, starting at
@@ -680,7 +892,9 @@ class _RoutingScreenState extends State<RoutingScreen> {
     if (route.length < 2) return route;
 
     final lastSegment = route.length - 2;
-    final firstSegment = (_routeProgressSegment - 2).clamp(0, lastSegment);
+    // Search slightly behind the last matched segment to absorb GPS jitter,
+    // but never let the visible route grow backwards again.
+    final firstSegment = (_routeProgressSegment - 1).clamp(0, lastSegment);
 
     var bestDistance = double.infinity;
     var bestPoint = route[firstSegment];
@@ -696,12 +910,27 @@ class _RoutingScreenState extends State<RoutingScreen> {
       }
     }
 
-    if (bestDistance > _offRouteThresholdM) return route;
+    if (bestDistance > _offRouteThresholdM) {
+      // Off the line (GPS drift or a detour). Keep the existing remainder so
+      // road that was already walked past never reappears; only fall back to
+      // the full route when no progress has been made yet.
+      return _remainingRoute ?? route;
+    }
 
+    if (bestSegment < _routeProgressSegment) {
+      bestSegment = _routeProgressSegment;
+      bestPoint = route[bestSegment];
+    }
     _routeProgressSegment = bestSegment;
-    // The projection point itself becomes the new visible start; everything
-    // before it (already driven) is dropped.
-    return [bestPoint, ...route.skip(bestSegment + 1)];
+
+    // The projection point becomes the new visible start; everything before it
+    // (already walked) is dropped.
+    final trimmed = <LatLng>[bestPoint, ...route.skip(bestSegment + 1)];
+    final previous = _remainingRoute;
+    if (previous != null && trimmed.length > previous.length) {
+      return previous;
+    }
+    return trimmed;
   }
 
   /// Navigation needs the live position stream that already powers the marker
@@ -717,9 +946,14 @@ class _RoutingScreenState extends State<RoutingScreen> {
   }
 
   Future<void> _checkForReroute() async {
+    if (_rerouteInFlight) return;
     if (_routePlanResult == null) return;
 
-    if (_originIsCurrentLocation && _currentPosition == null) return;
+    if (_originIsCurrentLocation &&
+        _currentPosition == null &&
+        _originLatLng == null) {
+      return;
+    }
     final origin = _effectiveOrigin;
     final destination = _destLatLng ?? _defaultLocation;
     if (origin.latitude == destination.latitude &&
@@ -727,66 +961,136 @@ class _RoutingScreenState extends State<RoutingScreen> {
       return;
     }
 
-    // Detect flood-status change before recomputing the route.
-    final floodChangeDetectedAt = DateTime.now();
-    final currentCctv = await CctvService.fetchCctvData();
-    final floodChanged = _cctvDataChanged(_lastRoutedCctvSnapshot, currentCctv);
-    if (!floodChanged) return;
+    _rerouteInFlight = true;
+    try {
+      // Detect flood-status change before recomputing the route.
+      final floodChangeDetectedAt = DateTime.now();
+      final currentCctv = await CctvService.fetchCctvData();
+      if (!mounted) return;
+      // An empty payload means the backend/network failed, NOT that every
+      // flood cleared. Ignoring it prevents the route from being rebuilt
+      // against "no hazards" and keeps the last known good snapshot.
+      if (currentCctv.isEmpty) return;
 
-    final previousSnapshot =
-        List<Map<String, dynamic>>.from(_lastRoutedCctvSnapshot);
+      final floodChanged =
+          _cctvDataChanged(_lastRoutedCctvSnapshot, currentCctv);
+      if (!floodChanged) return;
 
-    final newResult = await RoutePlanner.planRoute(
-      origin: origin,
-      destination: destination,
-      vehicleType: _selectedVehicleType,
-      context: RouteRequestContext(
-        isReroute: true,
-        floodChangeDetectedAt: floodChangeDetectedAt,
-        previousCctvDocs: previousSnapshot,
-      ),
-    );
-    if (!mounted || newResult == null) return;
+      final previousSnapshot =
+          List<Map<String, dynamic>>.from(_lastRoutedCctvSnapshot);
 
-    _lastRoutedCctvSnapshot =
-        List<Map<String, dynamic>>.from(RoutePlanner.lastCctvSnapshot);
-    if (mounted) {
-      setState(() => _cctvDocs = RoutePlanner.lastCctvSnapshot);
-      // Refresh segment geometries (cache HIT expected)
-      _loadRoadSegments(_cctvDocs);
+      final newResult = await RoutePlanner.planRoute(
+        origin: origin,
+        destination: destination,
+        vehicleType: _selectedVehicleType,
+        context: RouteRequestContext(
+          isReroute: true,
+          floodChangeDetectedAt: floodChangeDetectedAt,
+          previousCctvDocs: previousSnapshot,
+        ),
+      );
+      if (!mounted) return;
+
+      // Keep the CCTV map markers in sync even if the route itself did not
+      // need to change.
+      final routedSnapshot =
+          List<Map<String, dynamic>>.from(RoutePlanner.lastCctvSnapshot);
+      if (routedSnapshot.isEmpty) return;
+      _lastRoutedCctvSnapshot = routedSnapshot;
+      setState(() => _cctvDocs = routedSnapshot);
+      _loadRoadSegments(routedSnapshot);
+
+      if (newResult == null) return;
+
+      final previous = _routePlanResult;
+      if (!_routeChanged(previous, newResult)) return;
+
+      setState(() {
+        _routePlanResult = newResult;
+        _routeFound = true;
+        // Recompute progress against the new geometry, then immediately snap
+        // it to the live position so the rerouted line doesn't show road the
+        // user has already covered.
+        _routeProgressSegment = 0;
+        _remainingRoute = _originIsCurrentLocation && _currentPosition != null
+            ? _initialRemainder(newResult.polyline, _currentPosition!)
+            : null;
+      });
+      _showRerouteSnackbar();
+    } catch (_) {
+      // A failed poll must never break navigation; the next tick retries.
+    } finally {
+      _rerouteInFlight = false;
     }
-
-    final previous = _routePlanResult;
-    // Only surface an update when the safety picture meaningfully changed.
-    final changed = previous == null ||
-        newResult.isFullySafe != previous.isFullySafe ||
-        newResult.warningMessage != previous.warningMessage ||
-        newResult.polyline.length != previous.polyline.length;
-    if (!changed) return;
-
-    setState(() {
-      _routePlanResult = newResult;
-      _routeFound = true;
-      _routeProgressSegment = 0;
-      _remainingRoute = null;
-    });
-    _showRerouteSnackbar();
   }
 
-  /// Returns true when any CCTV feed status or water level changed.
+  /// Stable identity for a CCTV document: its coordinate pair (IDs are not
+  /// guaranteed to be present or ordered consistently between responses).
+  String _cctvKey(Map<String, dynamic> doc) {
+    try {
+      final coords = (doc['location'] as Map<String, dynamic>)['coordinates']
+          as List<dynamic>;
+      final lon = (coords[0] as num).toDouble();
+      final lat = (coords[1] as num).toDouble();
+      return '${lat.toStringAsFixed(5)},${lon.toStringAsFixed(5)}';
+    } catch (_) {
+      return doc['_id']?.toString() ?? doc.hashCode.toString();
+    }
+  }
+
+  /// Comparable state for one CCTV document: status + water level.
+  String _cctvFingerprint(Map<String, dynamic> doc) {
+    final status = (doc['status']?.toString() ?? '').toUpperCase();
+    final level = (doc['water_level'] as num?)?.toDouble();
+    return '$status|${level?.toStringAsFixed(3) ?? '-'}';
+  }
+
+  /// Returns true when any CCTV point's status or water level changed.
+  ///
+  /// Keyed by coordinate instead of list index because the backend does not
+  /// guarantee a stable document order between polls — an index-based compare
+  /// could miss a real change when documents are re-ordered.
   bool _cctvDataChanged(
     List<Map<String, dynamic>> previous,
     List<Map<String, dynamic>> current,
   ) {
-    if (previous.isEmpty) return current.isNotEmpty;
-    if (previous.length != current.length) return true;
+    if (current.isEmpty) return false;
+    if (previous.isEmpty) return true;
 
-    for (var i = 0; i < current.length; i++) {
-      final prevStatus = (previous[i]['status'] as String?)?.toLowerCase();
-      final curStatus = (current[i]['status'] as String?)?.toLowerCase();
-      final prevLevel = (previous[i]['water_level'] as num?)?.toDouble();
-      final curLevel = (current[i]['water_level'] as num?)?.toDouble();
-      if (prevStatus != curStatus || prevLevel != curLevel) return true;
+    final previousState = <String, String>{
+      for (final doc in previous) _cctvKey(doc): _cctvFingerprint(doc),
+    };
+    final currentState = <String, String>{
+      for (final doc in current) _cctvKey(doc): _cctvFingerprint(doc),
+    };
+
+    if (previousState.length != currentState.length) return true;
+    for (final entry in currentState.entries) {
+      if (previousState[entry.key] != entry.value) return true;
+    }
+    return false;
+  }
+
+  /// True when a recomputed route differs meaningfully from the old one.
+  ///
+  /// Comparing only `polyline.length` was unreliable: a detour can have the
+  /// same vertex count but a different shape, or differ only by distance /
+  /// safety warning. Sample every few vertices to catch shape changes without
+  /// a full O(n) deep comparison on long routes.
+  bool _routeChanged(RoutePlanResult? previous, RoutePlanResult next) {
+    if (previous == null) return true;
+    if (previous.isFullySafe != next.isFullySafe) return true;
+    if (previous.warningMessage != next.warningMessage) return true;
+    if ((previous.distanceKm - next.distanceKm).abs() > 0.05) return true;
+
+    final a = previous.polyline;
+    final b = next.polyline;
+    if (a.length != b.length) return true;
+    if (a.length < 2) return false;
+
+    final step = (a.length ~/ 8).clamp(1, 1000);
+    for (var i = 0; i < a.length; i += step) {
+      if (GeoUtils.haversineM(a[i], b[i]) > 1.0) return true;
     }
     return false;
   }
@@ -946,6 +1250,20 @@ class _RoutingScreenState extends State<RoutingScreen> {
                     options: MapOptions(
                       initialCenter: _defaultLocation,
                       initialZoom: 15,
+                      // Drag and zoom must always work, including while a
+                      // route is shown or navigation is active. Rotation is
+                      // left off so accidental two-finger twists don't tilt
+                      // the map.
+                      interactionOptions: const InteractionOptions(
+                        flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
+                      ),
+                      // A manual gesture suspends camera-following until the
+                      // user taps the re-center button.
+                      onPositionChanged: (camera, hasGesture) {
+                        if (!hasGesture) return;
+                        _cameraAnimation?.stop();
+                        _mapFollowsUser = false;
+                      },
                     ),
                     children: [
                       // Tile layer
@@ -1304,7 +1622,10 @@ class _RoutingScreenState extends State<RoutingScreen> {
               child: FloatingActionButton.small(
                 heroTag: 'recenter',
                 onPressed: () {
-                  final focusPoint = _originLatLng ?? _defaultLocation;
+                  // Re-enable following and jump back to the live position.
+                  _mapFollowsUser = true;
+                  final focusPoint =
+                      _currentPosition ?? _originLatLng ?? _defaultLocation;
                   _safeMapMove(focusPoint, 17);
                 },
                 backgroundColor: Colors.white,
@@ -1557,6 +1878,7 @@ class _RoutingScreenState extends State<RoutingScreen> {
                       setState(() {
                         _navigationStarted = true;
                         _routeFound = false;
+                        _mapFollowsUser = true;
                         // Start trimming the route from the beginning.
                         _routeProgressSegment = 0;
                         _remainingRoute = null;

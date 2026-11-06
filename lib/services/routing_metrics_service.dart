@@ -39,7 +39,7 @@ class RoutingMetricsService {
             },
             body: jsonEncode(payload),
           )
-          .timeout(const Duration(seconds: 8));
+          .timeout(const Duration(seconds: 20));
 
       if (response.statusCode != 200 && response.statusCode != 201) {
         debugPrint(

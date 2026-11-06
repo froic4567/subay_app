@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 
 /// Outcome of the standard location-access check. Carries enough detail for
@@ -62,14 +63,23 @@ class LocationService {
   static Future<Stream<Position>?> watchPosition({
     LocationAccuracy accuracy = LocationAccuracy.high,
     int distanceFilter = 0,
+    Duration intervalDuration = const Duration(seconds: 1),
   }) async {
     final status = await ensureAccess();
     if (status != LocationAccessStatus.granted) return null;
-    return Geolocator.getPositionStream(
-      locationSettings: LocationSettings(
-        accuracy: accuracy,
-        distanceFilter: distanceFilter,
-      ),
-    );
+    // `intervalDuration` only exists on AndroidSettings in geolocator 13;
+    // the generic LocationSettings type rejects it at compile time.
+    final LocationSettings settings =
+        defaultTargetPlatform == TargetPlatform.android
+            ? AndroidSettings(
+                accuracy: accuracy,
+                distanceFilter: distanceFilter,
+                intervalDuration: intervalDuration,
+              )
+            : LocationSettings(
+                accuracy: accuracy,
+                distanceFilter: distanceFilter,
+              );
+    return Geolocator.getPositionStream(locationSettings: settings);
   }
 }

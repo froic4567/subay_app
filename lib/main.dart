@@ -1,5 +1,7 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'theme/app_colors.dart';
@@ -12,11 +14,20 @@ import 'firebase_options.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await dotenv.load(fileName: '.env');
+  await ThemeController.load();
   if (Firebase.apps.isEmpty) {
     try {
-      await Firebase.initializeApp(
-        options: DefaultFirebaseOptions.currentPlatform,
-      );
+      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+        // On Android, read the config generated from google-services.json.
+        // This keeps Firebase Auth and Google Sign-In on the exact same
+        // project (including the registered SHA-1 fingerprint), which avoids
+        // DEVELOPER_ERROR / failed sign-in on physical devices.
+        await Firebase.initializeApp();
+      } else {
+        await Firebase.initializeApp(
+          options: DefaultFirebaseOptions.currentPlatform,
+        );
+      }
     } on FirebaseException catch (error) {
       if (error.code != 'duplicate-app') {
         rethrow;

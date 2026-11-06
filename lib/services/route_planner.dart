@@ -427,6 +427,11 @@ class RoutePlanner {
     //     safe path at all. Fetching geometry first lets every downstream
     //     check use the same, accurate definition of "near this hazard."
     final Map<String, RoadSegmentResult?> segmentsById = {};
+    // True when Overpass could not be reached and some hazard geometry is
+    // therefore unknown. Routing still proceeds using the raw camera
+    // coordinates (see the radius fallback in _segmentWeight), but the
+    // returned route carries a caution warning instead of failing outright.
+    var geometryUnavailable = false;
     // Measures only the Overpass road-segment request.
     final overpassStopwatch = Stopwatch();
     try {
@@ -442,54 +447,25 @@ class RoutePlanner {
       for (final n in hazardNodes) {
         segmentsById[n.id] = fetched[n.id];
       }
+      // A partial batch (some cameras resolved, others missing) is still a
+      // usable result, but flag it so the UI can show a caution note.
+      geometryUnavailable =
+          hazardNodes.any((n) => segmentsById[n.id] == null);
     } catch (e) {
       // Include the request duration when the Overpass call throws.
       if (overpassStopwatch.isRunning) overpassStopwatch.stop();
       overpassFetchTime = overpassStopwatch.elapsed;
+      geometryUnavailable = true;
       print('⚠️ [RoutePlanner] Road segment lookups failed: $e');
-      print('[RoadSegmentCache] TIMEOUT or geometry fetch failure');
-      // Conservative behavior: if any hazard is DANGER or an ALERT that
-      // is currently impassable for this vehicle, we cannot verify safety
-      // and must refuse to return a potentially unsafe route.
-      final critical = hazardNodes.where((h) =>
-          h.status.toUpperCase() == 'DANGER' ||
-          (h.status.toUpperCase() == 'ALERT' && !h.isPassableFor(vehicleType))).toList();
-      if (critical.isNotEmpty) {
-        for (final c in critical) {
-          print('[RoadSegmentCache] Geometry unavailable for critical CCTV ${c.id} status=${c.status}');
-        }
-        // Build simple origin/destination placeholders for the result.
-        final originNode = RouteNode(
-          id: 'origin',
-          name: 'Origin',
-          roadName: 'Your location',
-          location: origin,
-          status: 'SAFE',
-          waterLevelM: 0.0,
-          connectedIds: const [],
-        );
-        final destinationNode = RouteNode(
-          id: 'destination',
-          name: 'Destination',
-          roadName: 'Selected destination',
-          location: destination,
-          status: 'SAFE',
-          waterLevelM: 0.0,
-          connectedIds: const [],
-        );
-        return RoutePlanResult(
-          path: [originNode, destinationNode],
-          distanceKm: 0.0,
-          durationMinutes: 0.0,
-          avoidedNodes: avoidableNodes,
-          polyline: const [],
-          summary: 'Unable to verify safe route',
-          isFullySafe: false,
-          warningMessage:
-              'Unable to verify safe route because road geometry could not be fetched. Please try again later.',
-        );
-      }
-      // Otherwise continue using whatever cache is available and fallbacks.
+      print('[RoadSegmentCache] TIMEOUT or geometry fetch failure — '
+          'continuing with camera-location fallback checks');
+      // Do NOT abort here. Every safety check below already has a
+      // raw-coordinate radius fallback for hazards whose OSM geometry is
+      // unavailable, so a usable (if slightly more conservative) route can
+      // still be produced. Previously this branch returned an empty
+      // "Unable to verify safe route because road geometry could not be
+      // fetched" result, which left the user with no route at all whenever
+      // the free Overpass service was slow or rate-limited.
     }
 
     // 2. Fetch OSRM candidate routes (primary + alternatives).
@@ -805,9 +781,14 @@ class RoutePlanner {
     final distanceKm = chosenDistanceM / 1000.0;
     final durationMinutes = durationSec / 60.0;
 
+    // Prefer the safety-critical flood warning; otherwise, if road geometry
+    // could not be resolved, keep the route but tell the user it was checked
+    // against camera locations only.
     final warning = dijkstra.hasAlert
         ? 'Route passes through a flood alert zone. Proceed with caution for your vehicle type.'
-        : null;
+        : geometryUnavailable
+            ? 'Road geometry is temporarily unavailable, so flood checks used camera locations only. Proceed with caution.'
+            : null;
 
     pathGenStopwatch.stop();
 
