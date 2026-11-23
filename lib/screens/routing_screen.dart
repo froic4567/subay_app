@@ -213,6 +213,7 @@ class _RoutingScreenState extends State<RoutingScreen>
     final idToCoord = <String, LatLng>{};
     for (var i = 0; i < docs.length; i++) {
       final doc = docs[i];
+      if (!CctvService.hasValidLocation(doc)) continue;
       final coords = doc['location']['coordinates'] as List<dynamic>;
       final lon = (coords[0] as num).toDouble();
       final lat = (coords[1] as num).toDouble();
@@ -1114,6 +1115,7 @@ class _RoutingScreenState extends State<RoutingScreen>
     // Build markers list from CCTV data (fetched from MongoDB)
     final markers = <Marker>[];
     for (final cctv in _cctvDocs) {
+      if (!CctvService.hasValidLocation(cctv)) continue;
       final coordinates = cctv['location']['coordinates'] as List<dynamic>;
       final longitude = coordinates[0] as num;
       final latitude = coordinates[1] as num;

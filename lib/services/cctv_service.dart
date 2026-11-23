@@ -30,9 +30,26 @@ class CctvService {
     return 'http://10.0.2.2:3000';
   }
 
+  /// Whether a document carries a usable GeoJSON point.
+  ///
+  /// The database is not guaranteed to be uniform: a record can be missing
+  /// `location` (or `location.coordinates`) entirely. Consumers index into
+  /// `coordinates` directly, so one malformed document used to throw and break
+  /// the whole load. Filtering here keeps every consumer safe.
+  static bool hasValidLocation(Map<String, dynamic> doc) {
+    final location = doc['location'];
+    if (location is! Map) return false;
+    final coordinates = location['coordinates'];
+    if (coordinates is! List || coordinates.length < 2) return false;
+    return coordinates[0] is num && coordinates[1] is num;
+  }
+
   /// Fetches all CCTV documents from the MongoDB backend.
   /// Returns documents in the same format as the database:
   /// { status, water_level, location: { type: "Point", coordinates: [lng, lat] }, timestamp }
+  ///
+  /// Documents without a valid location are dropped, since they cannot be
+  /// rendered on the map or used for routing.
   ///
   /// Returns an empty list when the backend is unreachable or has no data.
   static Future<List<Map<String, dynamic>>> fetchCctvData() async {
@@ -60,7 +77,13 @@ class CctvService {
         return <Map<String, dynamic>>[];
       }
 
-      return json.cast<Map<String, dynamic>>();
+      final records = json.cast<Map<String, dynamic>>();
+      final valid = records.where(hasValidLocation).toList();
+      if (valid.length != records.length) {
+        print('⚠️ [CCTV] Skipped ${records.length - valid.length} '
+            'record(s) without valid coordinates');
+      }
+      return valid;
     } catch (e) {
       // Backend not running or unreachable — return no data so routing depends
       // purely on the live database's flood markers.
@@ -94,7 +117,7 @@ class CctvService {
 
       if (json.isEmpty) return <Map<String, dynamic>>[];
 
-      return json.cast<Map<String, dynamic>>();
+      return json.cast<Map<String, dynamic>>().where(hasValidLocation).toList();
     } catch (e) {
       print('❌ [Alerts] Connection failed: $e');
       return <Map<String, dynamic>>[];
@@ -105,7 +128,9 @@ class CctvService {
   /// Returns documents sorted by timestamp descending (newest first).
   /// Returns an empty list when the backend is unreachable or has no data.
   static Future<List<Map<String, dynamic>>> fetchAllNotifications() async {
-    final url = '$_baseUrl/api/cctv';
+    // Opt out of the location filter so location-less cameras still surface as
+    // notifications (their label comes from `location_name` when present).
+    final url = '$_baseUrl/api/cctv?includeWithoutLocation=true';
     print('🔌 [Notifications] Connecting to backend: $url');
 
     try {

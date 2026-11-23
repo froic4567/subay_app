@@ -105,6 +105,7 @@ class _MapScreenState extends State<MapScreen> {
   // CCTV locations fetched from MongoDB via backend API
   List<CctvLocation> _cctvLocations = [];
   bool _hasLoadedOnce = false;
+  bool _isFetchingCctv = false;
 
   // Road segments covered by each camera, keyed by CctvLocation.id.
   // Populated asynchronously via RoadSegmentService and cached there, so
@@ -144,24 +145,45 @@ class _MapScreenState extends State<MapScreen> {
   // ── Load CCTV data from backend API (MongoDB) ─────────────────────────────
 
   Future<void> _loadCctvData() async {
-    print('🗺️ [Map] Loading CCTV data...');
-    final docs = await CctvService.fetchCctvData();
-    print('🗺️ [Map] Total records to display: ${docs.length}');
+    // The 5s poll can overlap a slow request (Render free tier cold starts are
+    // 30s+), so never run two fetches at once.
+    if (_isFetchingCctv) return;
+    _isFetchingCctv = true;
 
-    if (mounted) {
-      final locations = docs.asMap().entries.map((entry) {
-        final cctv = _convertDocToCctv(entry.key, entry.value);
-        print('📍 [Map] CCTV #${entry.key + 1}: status=${cctv.status}, '
+    print('🗺️ [Map] Loading CCTV data...');
+    try {
+      final docs = await CctvService.fetchCctvData();
+      print('🗺️ [Map] Total records to display: ${docs.length}');
+
+      if (!mounted) return;
+
+      // Skip any malformed document instead of letting one bad record abort
+      // the whole load (which used to leave the map stuck on "Loading…").
+      final locations = <CctvLocation>[];
+      for (var i = 0; i < docs.length; i++) {
+        final cctv = _convertDocToCctv(i, docs[i]);
+        if (cctv == null) continue;
+        print('📍 [Map] CCTV #${locations.length + 1}: status=${cctv.status}, '
             'waterLevel=${cctv.floodHeight}m, '
             'position=${cctv.position.latitude},${cctv.position.longitude}');
-        return cctv;
-      }).toList();
+        locations.add(cctv);
+      }
+
       setState(() {
         _cctvLocations = locations;
         _hasLoadedOnce = true;
       });
       print('✅ [Map] Displaying ${_cctvLocations.length} CCTV markers on map');
       _loadRoadSegments(locations);
+    } catch (e) {
+      // A failure must still clear the first-load indicator; otherwise the
+      // spinner stays on screen forever.
+      print('❌ [Map] Failed to load CCTV data: $e');
+      if (mounted && !_hasLoadedOnce) {
+        setState(() => _hasLoadedOnce = true);
+      }
+    } finally {
+      _isFetchingCctv = false;
     }
   }
 
@@ -170,21 +192,28 @@ class _MapScreenState extends State<MapScreen> {
   /// settle. Markers already show from _loadCctvData; this only adds the
   /// road-coloring layer on top a moment later.
   Future<void> _loadRoadSegments(List<CctvLocation> locations) async {
-    // Batch road-segment resolution: query OSM once per viewport area and
-    // match cameras locally to avoid many per-camera Overpass calls.
-    final idToCoord = {for (final l in locations) l.id: l.position};
-    final batch = await RoadSegmentService.getSegmentsForCoordinates(idToCoord);
-    if (!mounted) return;
-    setState(() {
-      _roadSegments = {
-        for (final e in batch.entries)
-          if (e.value != null) e.key: e.value!,
-      };
-    });
+    if (locations.isEmpty) return;
+    try {
+      // Batch road-segment resolution: query OSM once per viewport area and
+      // match cameras locally to avoid many per-camera Overpass calls.
+      final idToCoord = {for (final l in locations) l.id: l.position};
+      final batch = await RoadSegmentService.getSegmentsForCoordinates(idToCoord);
+      if (!mounted) return;
+      setState(() {
+        _roadSegments = {
+          for (final e in batch.entries)
+            if (e.value != null) e.key: e.value!,
+        };
+      });
+    } catch (e) {
+      // Visualization can proceed without road geometry.
+      print('⚠️ [Map] Road segment lookup failed: $e');
+    }
   }
 
-  /// Converts a MongoDB CCTV document to a CctvLocation.
-  CctvLocation _convertDocToCctv(int index, Map<String, dynamic> doc) {
+  /// Converts a MongoDB CCTV document to a CctvLocation, or `null` when the
+  /// document has no usable coordinates (some DB records are locationless).
+  CctvLocation? _convertDocToCctv(int index, Map<String, dynamic> doc) {
     // Expected document structure:
     // {
     //   "status": "danger|alert|safe",
@@ -196,6 +225,10 @@ class _MapScreenState extends State<MapScreen> {
     //   "timestamp": "2026-07-15T07:30:00Z"
     // }
 
+    if (!CctvService.hasValidLocation(doc)) {
+      print('⚠️ [Convert] Skipping doc #$index: missing/invalid coordinates');
+      return null;
+    }
     final coordinates = doc['location']['coordinates'] as List<dynamic>;
     final longitude = (coordinates[0] as num).toDouble();
     final latitude = (coordinates[1] as num).toDouble();

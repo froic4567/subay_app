@@ -1,3 +1,18 @@
+Date: 11/23/2026                   Time: (session time not tracked)
+
+Changes Made:
+- Fixed the Map tab being permanently stuck on the "Loading flood data…" banner even though the Render backend was live. Root cause: the live `CCTVs / cctv data` collection contains records with no `location` field (e.g. `_id: feed-mastersons`, "Masterson's Avenue"). `map_screen.dart`'s `_convertDocToCctv` did `doc['location']['coordinates'] as List<dynamic>` with no guard, so that single document threw inside `_loadCctvData()` before `setState(() => _hasLoadedOnce = true)` ran; the 5-second status poll then retried and threw forever, so the first-load spinner never cleared.
+- `lib/services/cctv_service.dart`: added `CctvService.hasValidLocation(doc)` and made `fetchCctvData()` (and `fetchAlerts()`) drop records without a usable GeoJSON point, logging how many were skipped. `fetchAllNotifications()` opts out with `?includeWithoutLocation=true` so location-less cameras still appear as notifications via `location_name`.
+- `lib/screens/map_screen.dart`: `_convertDocToCctv` is now nullable and returns `null` for malformed records; `_loadCctvData()` skips them, always sets `_hasLoadedOnce = true` (even on error) and is guarded by `_isFetchingCctv` so the 5s poll can no longer stack overlapping requests during Render free-tier cold starts. `_loadRoadSegments` now catches lookup failures instead of surfacing an unhandled async error.
+- Same crash class removed from the Routing tab and planner: `routing_screen.dart`'s road-segment loop and marker builder skip invalid documents, and `route_planner.dart`'s `_seedNodes` now builds nodes in a loop that skips location-less docs (also tolerates missing `status`/`water_level`).
+- `backend/server.js`: `GET /api/cctv` now filters to geolocated documents by default (`location.coordinates.0/1` exist) so the currently installed APK stops breaking as soon as Render redeploys; `GET /api/cctv/:status` applies the same filter. Added `?includeWithoutLocation=true` for the notification path. No endpoint removed; still fully database-driven and still returns `[]` on DB failure.
+
+Failures Flag:
+- `flutter` is not installed / not on PATH on this machine, so `flutter analyze` could not be run here. `node --check backend/server.js` passes, and the backend was run locally against the real Atlas cluster to verify `/api/cctv` returns 6 geolocated docs vs 7 with `?includeWithoutLocation=true` and zero malformed records by default.
+
+Verification:
+- Queried the live `https://floodsight-api.onrender.com/api/cctv` before editing and confirmed 7 records with `Masterson's Avenue` having no `location` key at all. Reproduced the throw path in `_convertDocToCctv`, then re-read every edited region after the changes.
+
 Date: 08/06/2026                   Time: (session time not tracked)
 
 Changes Made:

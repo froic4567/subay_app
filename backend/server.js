@@ -95,6 +95,16 @@ function sanitizeDocs(docs) {
   });
 }
 
+// Map/routing clients index directly into `location.coordinates`, so a single
+// document missing that field would make the whole response unusable on the
+// client. Only return geolocated records from the map-facing endpoints.
+// (The notification screen uses /api/cctv too and handles missing coordinates,
+// but map and routing must only ever receive points.)
+const VALID_LOCATION_FILTER = {
+  'location.coordinates.0': { $exists: true },
+  'location.coordinates.1': { $exists: true },
+};
+
 // ── Routes ─────────────────────────────────────────────────────────────────
 
 // Friendly root page (the API itself lives under /api).
@@ -127,8 +137,19 @@ app.get('/api/cctv', async (req, res) => {
       return res.json([]);
     }
 
+    // Map/routing clients index straight into `location.coordinates`, so by
+    // default only geolocated records are returned. A single locationless
+    // document used to break the app's entire flood-data load. The notification
+    // screen (which tolerates missing coordinates) opts out with
+    // ?includeWithoutLocation=true.
+    const includeLocationless =
+      req.query.includeWithoutLocation === 'true' ||
+      req.query.includeWithoutLocation === '1';
+
     const documents = await dbCollection
-      .find({}, { projection: MOBILE_CCTV_PROJECTION })
+      .find(includeLocationless ? {} : VALID_LOCATION_FILTER, {
+        projection: MOBILE_CCTV_PROJECTION,
+      })
       .toArray();
     res.json(sanitizeDocs(documents));
   } catch (err) {
@@ -147,7 +168,10 @@ app.get('/api/cctv/:status', async (req, res) => {
     const status = req.params.status.toLowerCase();
     const documents = await dbCollection
       .find(
-        { status: { $in: [status, status.toUpperCase()] } },
+        {
+          status: { $in: [status, status.toUpperCase()] },
+          ...VALID_LOCATION_FILTER,
+        },
         { projection: MOBILE_CCTV_PROJECTION }
       )
       .toArray();

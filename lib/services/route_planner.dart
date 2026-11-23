@@ -2124,17 +2124,20 @@ class RoutePlanner {
   }
 
   static List<RouteNode> _seedNodes(List<Map<String, dynamic>> docs) {
-    return docs.asMap().entries.map((entry) {
-      final index = entry.key;
-      final doc = entry.value;
+    final nodes = <RouteNode>[];
+    for (var index = 0; index < docs.length; index++) {
+      final doc = docs[index];
+      // Locationless records cannot become routing nodes — skip them instead
+      // of throwing and breaking the whole route calculation.
+      if (!CctvService.hasValidLocation(doc)) continue;
       final coordinates = doc['location']['coordinates'] as List<dynamic>;
       final longitude = coordinates[0] as num;
       final latitude = coordinates[1] as num;
-      final status = (doc['status'] as String).toUpperCase();
-      final waterLevelM = (doc['water_level'] as num).toDouble();
+      final status = (doc['status'] as String? ?? 'normal').toUpperCase();
+      final waterLevelM = (doc['water_level'] as num?)?.toDouble() ?? 0;
       final stableId = _stableCctvId(doc, index);
 
-      return RouteNode(
+      nodes.add(RouteNode(
         id: stableId,
         name: 'CCTV-${(index + 1).toString().padLeft(2, '0')}',
         roadName: 'CCTV node ${index + 1}',
@@ -2142,8 +2145,9 @@ class RoutePlanner {
         status: status,
         waterLevelM: waterLevelM,
         connectedIds: const [],
-      );
-    }).toList();
+      ));
+    }
+    return nodes;
   }
 
   static double _sumMeters(List<LatLng> points) {
